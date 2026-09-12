@@ -192,14 +192,35 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	// Sequential multi-key channels should exhaust their first three keys before
+	// the request is considered failed. Keep the selected channel pinned while
+	// rotating keys; the normal retry path otherwise selects another channel.
+	var sequentialRetryChannel *model.Channel
+	sequentialKeyAttempts := 0
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
-		channel, channelErr := getChannel(c, relayInfo, retryParam)
-		if channelErr != nil {
-			logger.LogError(c, channelErr.Error())
-			newAPIError = channelErr
-			break
+		var channel *model.Channel
+		if sequentialRetryChannel != nil {
+			channel = sequentialRetryChannel
+			if channelErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); channelErr != nil {
+				logger.LogError(c, channelErr.Error())
+				newAPIError = channelErr
+				break
+			}
+		} else {
+			var channelErr *types.NewAPIError
+			channel, channelErr = getChannel(c, relayInfo, retryParam)
+			if channelErr != nil {
+				logger.LogError(c, channelErr.Error())
+				newAPIError = channelErr
+				break
+			}
+			if channel.ChannelInfo.IsMultiKey && channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeSequential {
+				sequentialKeyAttempts = 1
+			} else {
+				sequentialKeyAttempts = 0
+			}
 		}
 		addUsedChannel(c, channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
@@ -242,6 +263,26 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
+		}
+
+		// For sequential multi-key channels, rotate keys on the same channel
+		// first. The status update must be synchronous; processChannelError uses
+		// an asynchronous update, which can race with the next retry.
+		if channel.ChannelInfo.IsMultiKey && channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeSequential && sequentialKeyAttempts > 0 {
+			usingKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+			if service.ShouldDisableChannel(newAPIError) && channel.GetAutoBan() {
+				model.UpdateChannelStatus(channel.Id, usingKey, common.ChannelStatusAutoDisabled, newAPIError.ErrorWithStatusCode())
+			}
+			sequentialKeyAttempts++
+			if sequentialKeyAttempts <= 3 {
+				if nextKey, _, keyErr := channel.GetNextEnabledKey(); keyErr == nil && nextKey != usingKey {
+					sequentialRetryChannel = channel
+					continue
+				}
+			}
+			// After three keys (or when this channel has no further enabled key),
+			// let the normal retry path select another channel if one is available.
+			sequentialRetryChannel = nil
 		}
 	}
 
