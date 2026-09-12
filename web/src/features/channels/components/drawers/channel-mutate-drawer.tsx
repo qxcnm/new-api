@@ -4036,6 +4036,10 @@ export function ChannelMutateDrawer({
                             value: 'polling',
                             label: t('Polling'),
                           },
+                          {
+                            value: 'sequential',
+                            label: t('Sequential'),
+                          },
                         ]}
                         onValueChange={field.onChange}
                         value={field.value}
@@ -4053,14 +4057,18 @@ export function ChannelMutateDrawer({
                             <SelectItem value='polling'>
                               {t('Polling')}
                             </SelectItem>
+                            <SelectItem value='sequential'>
+                              {t('Sequential')}
+                            </SelectItem>
                           </SelectGroup>
                         </SelectContent>
                       </Select>
                       <FormDescription>
-                        {multiKeyType === 'polling' ? (
+                        {multiKeyType === 'polling' ||
+                        multiKeyType === 'sequential' ? (
                           <span className='text-warning'>
                             {t(
-                              'Polling mode requires Redis and memory cache, otherwise performance will be significantly degraded'
+                              'Polling and sequential modes require Redis and memory cache for consistent key selection'
                             )}
                           </span>
                         ) : (

@@ -1,11 +1,13 @@
 package model
 
 import (
+	"context"
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -219,8 +221,12 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	defer lock.Unlock()
 
 	statusList := channel.ChannelInfo.MultiKeyStatusList
+	redisStatusList := getRedisMultiKeyStatus(channel.Id)
 	// helper to get key status, default to enabled when missing
 	getStatus := func(idx int) int {
+		if status, ok := redisStatusList[idx]; ok {
+			return status
+		}
 		if statusList == nil {
 			return common.ChannelStatusEnabled
 		}
@@ -281,9 +287,77 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		}
 		// Fallback – should not happen, but return first enabled key
 		return keys[enabledIdx[0]], enabledIdx[0], nil
+	case constant.MultiKeyModeSequential:
+		// Sequential mode keeps using the first available key. Once that key
+		// is disabled, the next enabled key becomes active. Redis-backed
+		// statuses make this decision consistent across gateway instances.
+		return keys[enabledIdx[0]], enabledIdx[0], nil
 	default:
 		// Unknown mode, default to first enabled key (or original key string)
 		return keys[enabledIdx[0]], enabledIdx[0], nil
+	}
+}
+
+const multiKeyStatusRedisPrefix = "new-api:channel:multi-key-status:"
+
+func multiKeyStatusRedisKey(channelID int) string {
+	return multiKeyStatusRedisPrefix + strconv.Itoa(channelID)
+}
+
+func getRedisMultiKeyStatus(channelID int) map[int]int {
+	statuses := make(map[int]int)
+	if channelID <= 0 || !common.RedisEnabled || common.RDB == nil {
+		return statuses
+	}
+	values, err := common.RDB.HGetAll(context.Background(), multiKeyStatusRedisKey(channelID)).Result()
+	if err != nil {
+		common.SysLog(fmt.Sprintf("failed to read multi-key status from Redis: channel_id=%d, error=%v", channelID, err))
+		return statuses
+	}
+	for index, value := range values {
+		keyIndex, indexErr := strconv.Atoi(index)
+		status, statusErr := strconv.Atoi(value)
+		if indexErr == nil && statusErr == nil && keyIndex >= 0 {
+			statuses[keyIndex] = status
+		}
+	}
+	return statuses
+}
+
+func syncMultiKeyStatusToRedis(channelID, keyIndex, status int) {
+	if channelID <= 0 || keyIndex < 0 || !common.RedisEnabled || common.RDB == nil {
+		return
+	}
+	ctx := context.Background()
+	key := multiKeyStatusRedisKey(channelID)
+	var err error
+	if status == common.ChannelStatusEnabled {
+		err = common.RDB.HDel(ctx, key, strconv.Itoa(keyIndex)).Err()
+	} else {
+		err = common.RDB.HSet(ctx, key, strconv.Itoa(keyIndex), status).Err()
+	}
+	if err != nil {
+		common.SysLog(fmt.Sprintf("failed to write multi-key status to Redis: channel_id=%d, key_index=%d, error=%v", channelID, keyIndex, err))
+	}
+}
+
+// SyncMultiKeyStatusesToRedis replaces the Redis status snapshot after an
+// administrative key-pool edit (append, replace, enable-all, or deletion).
+func SyncMultiKeyStatusesToRedis(channel *Channel) {
+	if channel == nil || channel.Id <= 0 || !common.RedisEnabled || common.RDB == nil {
+		return
+	}
+	ctx := context.Background()
+	key := multiKeyStatusRedisKey(channel.Id)
+	pipe := common.RDB.TxPipeline()
+	pipe.Del(ctx, key)
+	for keyIndex, status := range channel.ChannelInfo.MultiKeyStatusList {
+		if status != common.ChannelStatusEnabled {
+			pipe.HSet(ctx, key, strconv.Itoa(keyIndex), status)
+		}
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		common.SysLog(fmt.Sprintf("failed to replace multi-key status in Redis: channel_id=%d, error=%v", channel.Id, err))
 	}
 }
 
@@ -598,6 +672,9 @@ func (channel *Channel) Update() error {
 		return err
 	}
 	DB.Model(channel).First(channel, "id = ?", channel.Id)
+	if channel.ChannelInfo.IsMultiKey {
+		SyncMultiKeyStatusesToRedis(channel)
+	}
 	err = channel.UpdateAbilities(nil)
 	return err
 }
@@ -629,6 +706,11 @@ func (channel *Channel) Delete() error {
 		return err
 	}
 	err = channel.DeleteAbilities()
+	if channel.ChannelInfo.IsMultiKey && common.RedisEnabled && common.RDB != nil {
+		if redisErr := common.RDB.Del(context.Background(), multiKeyStatusRedisKey(channel.Id)).Err(); redisErr != nil {
+			common.SysLog(fmt.Sprintf("failed to clear multi-key status from Redis: channel_id=%d, error=%v", channel.Id, redisErr))
+		}
+	}
 	return err
 }
 
@@ -804,6 +886,14 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 		if err != nil {
 			common.SysLog(fmt.Sprintf("failed to update channel status: channel_id=%d, status=%d, error=%v", channel.Id, status, err))
 			return false
+		}
+		if channel.ChannelInfo.IsMultiKey && usingKey != "" {
+			for keyIndex, key := range channel.GetKeys() {
+				if key == usingKey {
+					syncMultiKeyStatusToRedis(channel.Id, keyIndex, status)
+					break
+				}
+			}
 		}
 	}
 	return true

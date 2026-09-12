@@ -653,6 +653,13 @@ func AddChannel(c *gin.Context) {
 	keys := make([]string, 0)
 	switch addChannelRequest.Mode {
 	case "multi_to_single":
+		if addChannelRequest.MultiKeyMode == "" {
+			addChannelRequest.MultiKeyMode = constant.MultiKeyModeRandom
+		}
+		if !constant.IsValidMultiKeyMode(addChannelRequest.MultiKeyMode) {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "不支持的多密钥策略"})
+			return
+		}
 		addChannelRequest.Channel.ChannelInfo.IsMultiKey = true
 		addChannelRequest.Channel.ChannelInfo.MultiKeyMode = addChannelRequest.MultiKeyMode
 		if addChannelRequest.Channel.Type == constant.ChannelTypeVertexAi && addChannelRequest.Channel.GetOtherSettings().VertexKeyType != dto.VertexKeyTypeAPIKey {
@@ -1038,6 +1045,10 @@ func UpdateChannel(c *gin.Context) {
 
 	// If the request explicitly specifies a new MultiKeyMode, apply it on top of the original info.
 	if channel.MultiKeyMode != nil && *channel.MultiKeyMode != "" {
+		if !constant.IsValidMultiKeyMode(constant.MultiKeyMode(*channel.MultiKeyMode)) {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "不支持的多密钥策略"})
+			return
+		}
 		channel.ChannelInfo.MultiKeyMode = constant.MultiKeyMode(*channel.MultiKeyMode)
 	}
 

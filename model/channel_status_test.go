@@ -1,10 +1,14 @@
 package model
 
 import (
+	"context"
+	"sync"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/alicebob/miniredis/v2"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -25,6 +29,14 @@ func setupChannelStatusTest(t *testing.T) {
 
 func TestUpdateChannelStatusPersistsMultiKeyState(t *testing.T) {
 	setupChannelStatusTest(t)
+	server := miniredis.RunT(t)
+	previousRedisEnabled, previousRDB := common.RedisEnabled, common.RDB
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	common.RedisEnabled, common.RDB = true, client
+	t.Cleanup(func() {
+		_ = client.Close()
+		common.RedisEnabled, common.RDB = previousRedisEnabled, previousRDB
+	})
 
 	channel := Channel{
 		Name:   "multi-key-status",
@@ -49,6 +61,9 @@ func TestUpdateChannelStatusPersistsMultiKeyState(t *testing.T) {
 	assert.Equal(t, "provider rejected key", stored.ChannelInfo.MultiKeyDisabledReason[0])
 	assert.NotZero(t, stored.ChannelInfo.MultiKeyDisabledTime[0])
 	assert.Equal(t, 1, stored.ChannelInfo.MultiKeyPollingIndex)
+	redisStatus, err := client.HGet(context.Background(), multiKeyStatusRedisKey(channel.Id), "0").Result()
+	require.NoError(t, err)
+	assert.Equal(t, "3", redisStatus)
 }
 
 func TestSaveStatusStateFromSingleKeySnapshotPreservesUnownedColumns(t *testing.T) {
@@ -99,4 +114,47 @@ func TestSaveStatusStateFromSingleKeySnapshotPreservesUnownedColumns(t *testing.
 	otherInfo := stored.GetOtherInfo()
 	assert.Equal(t, "manual operation", otherInfo["status_reason"])
 	assert.Equal(t, float64(1234), otherInfo["status_time"])
+}
+
+func TestSequentialKeySelectionUsesFirstAvailableRedisStatus(t *testing.T) {
+	server := miniredis.RunT(t)
+	previousRedisEnabled, previousRDB, previousMemoryCache := common.RedisEnabled, common.RDB, common.MemoryCacheEnabled
+	previousChannels := channelsIDM
+	previousLocks := channelPollingLocks
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	common.RedisEnabled, common.RDB, common.MemoryCacheEnabled = true, client, true
+	channel := &Channel{
+		Id:   99101,
+		Key:  "key-a\nkey-b",
+		Keys: []string{"key-a", "key-b"},
+		ChannelInfo: ChannelInfo{
+			IsMultiKey:   true,
+			MultiKeySize: 2,
+			MultiKeyMode: constant.MultiKeyModeSequential,
+		},
+	}
+	channelsIDM = map[int]*Channel{channel.Id: channel}
+	channelPollingLocks = sync.Map{}
+	t.Cleanup(func() {
+		_ = client.Close()
+		common.RedisEnabled, common.RDB, common.MemoryCacheEnabled = previousRedisEnabled, previousRDB, previousMemoryCache
+		channelsIDM = previousChannels
+		channelPollingLocks = previousLocks
+	})
+
+	key, index, apiErr := channel.GetNextEnabledKey()
+	require.Nil(t, apiErr)
+	require.Equal(t, "key-a", key)
+	require.Equal(t, 0, index)
+
+	require.NoError(t, common.RDB.HSet(context.Background(), multiKeyStatusRedisKey(channel.Id), "0", common.ChannelStatusAutoDisabled).Err())
+	key, index, apiErr = channel.GetNextEnabledKey()
+	require.Nil(t, apiErr)
+	require.Equal(t, "key-b", key)
+	require.Equal(t, 1, index)
+
+	key, index, apiErr = channel.GetNextEnabledKey()
+	require.Nil(t, apiErr)
+	require.Equal(t, "key-b", key)
+	require.Equal(t, 1, index)
 }

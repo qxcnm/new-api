@@ -84,6 +84,13 @@ export function MultiKeyManageDialog({
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
     ADMIN_PERMISSION_ACTIONS.SENSITIVE_WRITE
   )
+  const multiKeyMode = currentRow?.channel_info?.multi_key_mode
+  let multiKeyModeLabel = t('Polling')
+  if (multiKeyMode === 'random') {
+    multiKeyModeLabel = t('Random')
+  } else if (multiKeyMode === 'sequential') {
+    multiKeyModeLabel = t('Sequential')
+  }
 
   // Data state
   const [isLoading, setIsLoading] = useState(false)
@@ -247,11 +254,7 @@ export function MultiKeyManageDialog({
             />
             {currentRow.channel_info?.multi_key_mode && (
               <StatusBadge
-                label={
-                  currentRow.channel_info.multi_key_mode === 'random'
-                    ? t('Random')
-                    : t('Polling')
-                }
+                label={multiKeyModeLabel}
                 variant='neutral'
                 copyable={false}
               />

@@ -788,10 +788,12 @@ export function useChannelsColumns(
           const multiKeyMode = channel.channel_info?.multi_key_mode ?? 'random'
           const MultiKeyModeIcon =
             multiKeyMode === 'random' ? Shuffle : ListOrdered
-          const multiKeyTooltip =
-            multiKeyMode === 'random'
-              ? t('Multi-key: Random rotation')
-              : t('Multi-key: Polling rotation')
+          let multiKeyTooltip = t('Multi-key: Polling rotation')
+          if (multiKeyMode === 'random') {
+            multiKeyTooltip = t('Multi-key: Random rotation')
+          } else if (multiKeyMode === 'sequential') {
+            multiKeyTooltip = t('Multi-key: Sequential selection')
+          }
 
           const ionetMeta = parseIonetMeta(channel.other_info)
           const isIonet = ionetMeta?.source === 'ionet'

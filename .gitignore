@@ -44,3 +44,8 @@ relaykit/relayconvert/chat_responses_live_local_test.go
 service/openaicompat/chat_responses_live_local_test.go
 go.work
 go.work.sum
+new-api-v1.0.0-rc.37-linux-amd64.tar
+postgres-15-linux-amd64.tar
+redis-latest-linux-amd64.tar
+new-api-upgrade-*.tar
+bin/upgrade-new-api*/

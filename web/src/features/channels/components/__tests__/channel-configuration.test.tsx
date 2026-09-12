@@ -1708,6 +1708,8 @@ test('an operator without sensitive write permission can discover saved models a
 test.each([
   ['random', 'Random', 'polling', 'Polling'],
   ['polling', 'Polling', 'random', 'Random'],
+  ['random', 'Random', 'sequential', 'Sequential'],
+  ['sequential', 'Sequential', 'polling', 'Polling'],
 ] as const)(
   'multi-key editing switches from %s without replacing keys',
   async (initialMode, initialLabel, nextMode, nextLabel) => {
