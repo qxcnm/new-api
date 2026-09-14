@@ -252,6 +252,7 @@ const (
 	MsgSettingWebhookEmpty     = "setting.webhook_empty"
 	MsgSettingWebhookInvalid   = "setting.webhook_invalid"
 	MsgSettingEmailInvalid     = "setting.email_invalid"
+	MsgSettingPhoneInvalid     = "setting.phone_invalid"
 	MsgSettingBarkUrlEmpty     = "setting.bark_url_empty"
 	MsgSettingBarkUrlInvalid   = "setting.bark_url_invalid"
 	MsgSettingGotifyUrlEmpty   = "setting.gotify_url_empty"

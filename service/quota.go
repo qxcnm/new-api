@@ -500,8 +500,12 @@ func checkAndSendQuotaNotify(relayInfo *relaycommon.RelayInfo, quota int, preCon
 				notifyType = dto.NotifyTypeEmail
 			}
 
-			if notifyType == dto.NotifyTypeBark {
-				// Bark推送使用简短文本，不支持HTML
+			if notifyType == dto.NotifyTypeSMS {
+				// 短信模板按 Novro 约定接收 balance、threshold 两个变量。
+				content = "余额：{{value}}，提醒阈值：{{value}}，请及时充值"
+				values = []any{logger.FormatQuota(relayInfo.UserQuota), logger.FormatQuota(threshold)}
+			} else if notifyType == dto.NotifyTypeBark {
+				// Bark推送使用简短文本，不支持HTML。
 				content = "{{value}}，剩余额度：{{value}}，请及时充值"
 				values = []any{prompt, logger.FormatQuota(relayInfo.UserQuota)}
 			} else if notifyType == dto.NotifyTypeGotify {
@@ -552,7 +556,10 @@ func checkAndSendSubscriptionQuotaNotify(relayInfo *relaycommon.RelayInfo) {
 			notifyType = dto.NotifyTypeEmail
 		}
 
-		if notifyType == dto.NotifyTypeBark {
+		if notifyType == dto.NotifyTypeSMS {
+			content = "余额：{{value}}，提醒阈值：{{value}}，请及时充值"
+			values = []any{logger.FormatQuota(int(remaining)), logger.FormatQuota(threshold)}
+		} else if notifyType == dto.NotifyTypeBark {
 			content = "{{value}}，剩余额度：{{value}}，请及时充值"
 			values = []any{prompt, logger.FormatQuota(int(remaining))}
 		} else if notifyType == dto.NotifyTypeGotify {

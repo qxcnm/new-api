@@ -90,7 +90,7 @@ export interface UserProfile {
 /**
  * Notification type
  */
-export type NotifyType = 'email' | 'webhook' | 'bark' | 'gotify'
+export type NotifyType = 'email' | 'webhook' | 'bark' | 'gotify' | 'sms'
 
 /**
  * Parsed user settings
@@ -106,6 +106,8 @@ export interface UserSettings {
   webhook_secret?: string
   /** Notification email */
   notification_email?: string
+  /** Notification phone number */
+  notification_phone?: string
   /** Bark URL */
   bark_url?: string
   /** Gotify server URL */
@@ -155,6 +157,7 @@ export interface UpdateUserSettingsRequest {
   webhook_url?: string
   webhook_secret?: string
   notification_email?: string
+  notification_phone?: string
   bark_url?: string
   gotify_url?: string
   gotify_token?: string

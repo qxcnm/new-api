@@ -6,6 +6,7 @@ type UserSetting struct {
 	WebhookUrl                       string  `json:"webhook_url,omitempty"`                          // WebhookUrl webhook地址
 	WebhookSecret                    string  `json:"webhook_secret,omitempty"`                       // WebhookSecret webhook密钥
 	NotificationEmail                string  `json:"notification_email,omitempty"`                   // NotificationEmail 通知邮箱地址
+	NotificationPhone                string  `json:"notification_phone,omitempty"`                   // NotificationPhone 通知手机号
 	BarkUrl                          string  `json:"bark_url,omitempty"`                             // BarkUrl Bark推送URL
 	GotifyUrl                        string  `json:"gotify_url,omitempty"`                           // GotifyUrl Gotify服务器地址
 	GotifyToken                      string  `json:"gotify_token,omitempty"`                         // GotifyToken Gotify应用令牌
@@ -23,4 +24,5 @@ var (
 	NotifyTypeWebhook = "webhook" // Webhook
 	NotifyTypeBark    = "bark"    // Bark 推送
 	NotifyTypeGotify  = "gotify"  // Gotify 推送
+	NotifyTypeSMS     = "sms"     // SMS 短信
 )

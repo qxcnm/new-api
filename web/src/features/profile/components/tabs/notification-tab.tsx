@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Bell, Loader2, Mail, Server, Webhook } from 'lucide-react'
+import { Bell, Loader2, Mail, Server, Smartphone, Webhook } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -47,6 +47,7 @@ const NOTIFICATION_ICONS: Record<NotifyType, typeof Mail> = {
   webhook: Webhook,
   bark: Bell,
   gotify: Server,
+  sms: Smartphone,
 }
 
 // ============================================================================
@@ -140,7 +141,7 @@ export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
           variant='outline'
           size='lg'
           spacing={2}
-          className='grid w-full grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3'
+          className='grid w-full grid-cols-2 gap-2 sm:grid-cols-5 sm:gap-3'
         >
           {NOTIFICATION_METHODS.map((method) => {
             const Icon = NOTIFICATION_ICONS[method.value]
@@ -193,6 +194,25 @@ export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
             onChange={(e) => updateField('notification_email', e.target.value)}
             placeholder={t('Leave empty to use account email')}
           />
+        </div>
+      )}
+
+      {notifyType === 'sms' && (
+        <div className='space-y-1.5'>
+          <Label htmlFor='notifyPhone'>{t('Notification Phone')}</Label>
+          <Input
+            id='notifyPhone'
+            type='tel'
+            inputMode='tel'
+            value={settings.notification_phone}
+            onChange={(e) => updateField('notification_phone', e.target.value)}
+            placeholder={t('Enter phone number')}
+          />
+          <p className='text-muted-foreground text-xs'>
+            {t(
+              'SMS notifications require an enabled administrator SMS configuration'
+            )}
+          </p>
         </div>
       )}
 

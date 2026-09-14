@@ -35,6 +35,7 @@ export function normalizeUserSettings(
     quota_warning_threshold:
       parsed.quota_warning_threshold ?? DEFAULT_QUOTA_WARNING_THRESHOLD,
     notification_email: parsed.notification_email ?? '',
+    notification_phone: parsed.notification_phone ?? '',
     webhook_url: parsed.webhook_url ?? '',
     webhook_secret: parsed.webhook_secret ?? '',
     bark_url: parsed.bark_url ?? '',

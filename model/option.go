@@ -74,6 +74,11 @@ func InitOptionMap() {
 	common.OptionMap["SMTPStartTLSEnabled"] = strconv.FormatBool(common.SMTPStartTLSEnabled)
 	common.OptionMap["SMTPInsecureSkipVerify"] = strconv.FormatBool(common.SMTPInsecureSkipVerify)
 	common.OptionMap["SMTPForceAuthLogin"] = strconv.FormatBool(common.SMTPForceAuthLogin)
+	common.OptionMap["SMSAliyunEnabled"] = "false"
+	common.OptionMap["SMSAliyunAccessKeyID"] = ""
+	common.OptionMap["SMSAliyunAccessKeySecret"] = ""
+	common.OptionMap["SMSAliyunSignName"] = ""
+	common.OptionMap["SMSAliyunTemplateCode"] = ""
 	common.OptionMap["Notice"] = ""
 	common.OptionMap["About"] = ""
 	common.OptionMap["HomePageContent"] = ""
