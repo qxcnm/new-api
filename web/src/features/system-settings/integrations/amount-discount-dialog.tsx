@@ -58,11 +58,14 @@ export type AmountDiscountData = {
   discountRate: number
 }
 
+export type AmountTierKind = 'discount' | 'bonus'
+
 type AmountDiscountDialogProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
   onSave: (data: AmountDiscountData) => void
   editData?: AmountDiscountData | null
+  kind?: AmountTierKind
 }
 
 export function AmountDiscountDialog({
@@ -70,16 +73,38 @@ export function AmountDiscountDialog({
   onOpenChange,
   onSave,
   editData,
+  kind = 'discount',
 }: AmountDiscountDialogProps) {
   const { t } = useTranslation()
   const isEditMode = !!editData
-  const amountDiscountDialogSchema = createAmountDiscountDialogSchema(t)
+  const isDiscount = kind === 'discount'
+  const amountDiscountDialogSchema = useMemo(() => {
+    const baseSchema = createAmountDiscountDialogSchema(t)
+    if (kind === 'discount') return baseSchema
+    return baseSchema.extend({
+      discountRate: z
+        .number()
+        .positive(t('Bonus percentage must be greater than 0'))
+        .max(1000, t('Bonus percentage must be ≤ 1000')),
+    })
+  }, [kind, t])
+  const defaultRate = kind === 'discount' ? 1 : 10
+  let dialogTitle: string
+  if (kind === 'discount') {
+    dialogTitle = isEditMode ? t('Edit discount tier') : t('Add discount tier')
+  } else {
+    dialogTitle = isEditMode ? t('Edit bonus tier') : t('Add bonus tier')
+  }
+  const dialogDescription =
+    kind === 'discount'
+      ? t('Set a discount rate for a specific recharge amount threshold.')
+      : t('Set a bonus percentage for a specific recharge amount threshold.')
 
   const form = useForm<AmountDiscountDialogFormValues>({
     resolver: zodResolver(amountDiscountDialogSchema),
     defaultValues: {
       amount: 0,
-      discountRate: 1,
+      discountRate: defaultRate,
     },
   })
 
@@ -96,10 +121,10 @@ export function AmountDiscountDialog({
     } else {
       form.reset({
         amount: 0,
-        discountRate: 1,
+        discountRate: defaultRate,
       })
     }
-  }, [editData, form, open])
+  }, [defaultRate, editData, form, open])
 
   const handleSubmit = (values: AmountDiscountDialogFormValues) => {
     onSave({
@@ -114,10 +139,8 @@ export function AmountDiscountDialog({
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      title={isEditMode ? t('Edit discount tier') : t('Add discount tier')}
-      description={t(
-        'Set a discount rate for a specific recharge amount threshold.'
-      )}
+      title={dialogTitle}
+      description={dialogDescription}
       contentClassName='sm:max-w-[500px]'
       contentHeight='auto'
       bodyClassName='space-y-4'
@@ -156,7 +179,7 @@ export function AmountDiscountDialog({
                     placeholder={t('e.g., 100')}
                     {...field}
                     onChange={(e) =>
-                      field.onChange(parseInt(e.target.value) || 0)
+                      field.onChange(Number.parseInt(e.target.value) || 0)
                     }
                     disabled={isEditMode}
                   />
@@ -165,7 +188,9 @@ export function AmountDiscountDialog({
                   {isEditMode
                     ? t('Amount cannot be changed when editing.')
                     : t(
-                        'Minimum recharge amount to qualify for this discount.'
+                        isDiscount
+                          ? 'Minimum recharge amount to qualify for this discount.'
+                          : 'Minimum recharge amount to qualify for this bonus.'
                       )}
                 </FormDescription>
                 <FormMessage />
@@ -178,29 +203,37 @@ export function AmountDiscountDialog({
             name='discountRate'
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{t('Discount Rate')}</FormLabel>
+                <FormLabel>
+                  {kind === 'discount'
+                    ? t('Discount Rate')
+                    : t('Bonus Percentage')}
+                </FormLabel>
                 <FormControl>
                   <Input
                     type='number'
                     step='0.01'
                     min='0.01'
-                    max='1'
-                    placeholder={t('e.g., 0.95')}
+                    max={kind === 'discount' ? '1' : '1000'}
+                    placeholder={t(
+                      kind === 'discount' ? 'e.g., 0.95' : 'e.g., 10'
+                    )}
                     {...field}
                     onChange={(e) =>
-                      field.onChange(parseFloat(e.target.value) || 0)
+                      field.onChange(Number.parseFloat(e.target.value) || 0)
                     }
                   />
                 </FormControl>
                 <FormDescription>
-                  {t('Final price multiplier (0.95 = 5% discount')}
-                  {discountPercentage > 0 && (
+                  {kind === 'discount'
+                    ? t('Final price multiplier (0.95 = 5% discount')
+                    : t('Extra balance percentage (10 = 10% bonus)')}
+                  {kind === 'discount' && discountPercentage > 0 && (
                     <span className='ml-1 font-medium text-green-600 dark:text-green-400'>
                       = {discountPercentage}
                       {t('% off')}
                     </span>
                   )}
-                  )
+                  {kind === 'discount' ? ')' : null}
                 </FormDescription>
                 <FormMessage />
               </FormItem>

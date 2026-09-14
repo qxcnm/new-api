@@ -27,8 +27,15 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { getCurrencyLabel } from '@/lib/currency'
+import {
+  getEditableQuotaStep,
+  parseQuotaFromDollars,
+  quotaUnitsToEditableAmount,
+} from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { ROLE } from '@/lib/roles'
+import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { updateUserSettings } from '../../api'
 import { NOTIFICATION_METHODS } from '../../constants'
@@ -53,9 +60,18 @@ interface NotificationTabProps {
 
 export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
   const { t } = useTranslation()
+  const currency = useSystemConfigStore((state) => state.config.currency)
   const isAdmin = (profile?.role ?? 0) >= ROLE.ADMIN
   const [loading, setLoading] = useState(false)
-  const [settings, setSettings] = useState(() => normalizeUserSettings())
+  const [settings, setSettings] = useState(() => {
+    const defaults = normalizeUserSettings()
+    return {
+      ...defaults,
+      quota_warning_threshold: quotaUnitsToEditableAmount(
+        defaults.quota_warning_threshold
+      ),
+    }
+  })
 
   // Update form field helper
   const updateField = useCallback(
@@ -70,15 +86,28 @@ export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
 
   useEffect(() => {
     if (profile?.setting) {
-      setSettings(normalizeUserSettings(profile.setting))
+      const normalized = normalizeUserSettings(profile.setting)
+      setSettings({
+        ...normalized,
+        quota_warning_threshold: quotaUnitsToEditableAmount(
+          normalized.quota_warning_threshold
+        ),
+      })
     }
-  }, [profile])
+  }, [profile, currency])
 
   const handleSave = async () => {
     try {
       setLoading(true)
-      const { record_ip_log: _recordIpLog, ...notificationSettings } = settings
-      const response = await updateUserSettings(notificationSettings)
+      const {
+        record_ip_log: _recordIpLog,
+        quota_warning_threshold,
+        ...notificationSettings
+      } = settings
+      const response = await updateUserSettings({
+        ...notificationSettings,
+        quota_warning_threshold: parseQuotaFromDollars(quota_warning_threshold),
+      })
 
       if (response.success) {
         toast.success(t('Settings updated successfully'))
@@ -94,6 +123,7 @@ export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
   }
 
   const notifyType = settings.notify_type
+  const currencyLabel = getCurrencyLabel()
 
   return (
     <div className='space-y-4 sm:space-y-6'>
@@ -137,6 +167,8 @@ export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
           id='threshold'
           type='number'
           className='h-9'
+          min={0}
+          step={getEditableQuotaStep()}
           value={settings.quota_warning_threshold}
           onChange={(e) =>
             updateField('quota_warning_threshold', Number(e.target.value))
@@ -144,7 +176,8 @@ export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
           placeholder={t('Enter threshold')}
         />
         <p className='text-muted-foreground text-xs'>
-          {t('Get notified when balance falls below this value')}
+          {t('Get notified when balance falls below this value')} (
+          {currencyLabel})
         </p>
       </div>
 

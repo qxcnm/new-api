@@ -99,7 +99,7 @@ func (*CreemAdaptor) RequestPay(c *gin.Context, req *CreemPayRequest) {
 	}
 
 	id := c.GetInt("id")
-	if rejectInvalidCreditedQuota(c, id, decimal.NewFromInt(selectedProduct.Quota)) {
+	if rejectInvalidCreditedQuota(c, id, decimal.NewFromInt(selectedProduct.Quota), selectedProduct.Price) {
 		return
 	}
 

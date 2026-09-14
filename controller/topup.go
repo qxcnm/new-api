@@ -119,6 +119,7 @@ func GetTopUpInfo(c *gin.Context) {
 		"waffo_pancake_min_topup": setting.WaffoPancakeMinTopUp,
 		"amount_options":          operation_setting.GetPaymentSetting().AmountOptions,
 		"discount":                operation_setting.GetPaymentSetting().AmountDiscount,
+		"amount_bonus":            operation_setting.GetTopUpBonusRules(),
 		"topup_link":              common.TopUpLink,
 	}
 	common.ApiSuccess(c, data)
@@ -199,15 +200,19 @@ func getTopUpQuota(amount int64) (int, error) {
 	} else {
 		quota = quota.Mul(decimal.NewFromFloat(common.QuotaPerUnit))
 	}
-	return common.WalletQuotaFromDecimalStrict(quota)
+	return model.TopUpQuotaWithBonus(quota, float64(amount))
 }
 
 func getMaxTopUpAmount() int64 {
 	if common.QuotaPerUnit <= 0 {
 		return 0
 	}
+	bonusMultiplier := decimal.NewFromInt(100).
+		Add(decimal.NewFromFloat(operation_setting.GetMaxTopUpBonusPercent())).
+		Div(decimal.NewFromInt(100))
 	quotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
 	maxStoredAmount := decimal.NewFromInt(common.MaxWalletQuota).
+		Div(bonusMultiplier).
 		Div(quotaPerUnit).
 		Floor()
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
@@ -220,8 +225,8 @@ func getMaxTopUpAmount() int64 {
 	return maxStoredAmount.IntPart()
 }
 
-func validateCreditedQuota(quota decimal.Decimal) (int, error) {
-	value, err := common.WalletQuotaFromDecimalStrict(quota)
+func validateCreditedQuota(quota decimal.Decimal, rechargeAmounts ...float64) (int, error) {
+	value, err := model.TopUpQuotaWithBonus(quota, rechargeAmounts...)
 	if err != nil {
 		return 0, errors.New("充值额度超出系统可表示范围")
 	}
@@ -243,8 +248,8 @@ func validateTopUpQuota(amount int64) (int, error) {
 	return 0, errors.New("充值数量无效")
 }
 
-func rejectInvalidCreditedQuota(c *gin.Context, userId int, quota decimal.Decimal) bool {
-	creditedQuota, err := validateCreditedQuota(quota)
+func rejectInvalidCreditedQuota(c *gin.Context, userId int, quota decimal.Decimal, rechargeAmounts ...float64) bool {
+	creditedQuota, err := validateCreditedQuota(quota, rechargeAmounts...)
 	if err == nil {
 		err = model.ValidateTopUpQuotaCapacity(userId, creditedQuota)
 	}

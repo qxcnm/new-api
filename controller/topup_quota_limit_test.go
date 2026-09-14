@@ -74,6 +74,46 @@ func TestTopUpQuotaValidation(t *testing.T) {
 	}
 }
 
+func TestTopUpQuotaValidationIncludesBonus(t *testing.T) {
+	oldQuotaPerUnit := common.QuotaPerUnit
+	oldDisplayType := operation_setting.GetGeneralSetting().QuotaDisplayType
+	oldAmountBonus := operation_setting.GetPaymentSetting().AmountBonus
+	common.QuotaPerUnit = 500000
+	operation_setting.GetGeneralSetting().QuotaDisplayType = operation_setting.QuotaDisplayTypeUSD
+	operation_setting.GetPaymentSetting().AmountBonus = map[int]float64{100: 10, 500: 20}
+	t.Cleanup(func() {
+		common.QuotaPerUnit = oldQuotaPerUnit
+		operation_setting.GetGeneralSetting().QuotaDisplayType = oldDisplayType
+		operation_setting.GetPaymentSetting().AmountBonus = oldAmountBonus
+	})
+
+	for _, testCase := range []struct {
+		name   string
+		amount int64
+		want   int
+	}{
+		{name: "below first threshold", amount: 99, want: 49_500_000},
+		{name: "first threshold", amount: 100, want: 55_000_000},
+		{name: "highest matching threshold", amount: 500, want: 300_000_000},
+		{name: "between thresholds", amount: 250, want: 137_500_000},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			quota, err := getTopUpQuota(testCase.amount)
+			require.NoError(t, err)
+			assert.Equal(t, testCase.want, quota)
+		})
+	}
+}
+
+func TestValidateAmountBonusJSON(t *testing.T) {
+	require.NoError(t, operation_setting.ValidateAmountBonusJSON(`{"100":10,"500":20}`))
+	require.NoError(t, operation_setting.ValidateAmountBonusJSON(`{}`))
+	require.Error(t, operation_setting.ValidateAmountBonusJSON(`{"0":10}`))
+	require.Error(t, operation_setting.ValidateAmountBonusJSON(`{"100":1000.01}`))
+	require.Error(t, operation_setting.ValidateAmountBonusJSON(`{"100":"10"}`))
+	require.Error(t, operation_setting.ValidateAmountBonusJSON(`[]`))
+}
+
 func TestValidateTopUpQuotaReturnsMaximumAmount(t *testing.T) {
 	oldQuotaPerUnit := common.QuotaPerUnit
 	oldDisplayType := operation_setting.GetGeneralSetting().QuotaDisplayType

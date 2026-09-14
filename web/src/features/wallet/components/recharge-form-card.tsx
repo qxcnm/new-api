@@ -83,6 +83,31 @@ interface RechargeFormCardProps {
   enableWaffoPancakeTopup?: boolean
 }
 
+function getAmountBonusPercent(
+  amount: number,
+  rules?: Record<number, number>
+): number {
+  if (!Number.isFinite(amount) || amount <= 0 || !rules) return 0
+
+  let matchedThreshold = 0
+  let matchedPercent = 0
+  for (const [thresholdText, percent] of Object.entries(rules)) {
+    const threshold = Number(thresholdText)
+    if (
+      Number.isFinite(threshold) &&
+      threshold > 0 &&
+      threshold <= amount &&
+      Number.isFinite(percent) &&
+      percent > 0 &&
+      threshold > matchedThreshold
+    ) {
+      matchedThreshold = threshold
+      matchedPercent = percent
+    }
+  }
+  return matchedPercent
+}
+
 export function RechargeFormCard({
   topupInfo,
   presetAmounts,
@@ -142,6 +167,10 @@ export function RechargeFormCard({
     Array.isArray(waffoPayMethods) && waffoPayMethods.length > 0
   const minTopup = getMinTopupAmount(topupInfo)
   const redemptionEnabled = topupInfo?.enable_redemption !== false
+  const amountBonusPercent = getAmountBonusPercent(
+    topupAmount,
+    topupInfo?.amount_bonus
+  )
 
   if (loading) {
     return (
@@ -288,6 +317,13 @@ export function RechargeFormCard({
                 >
                   {t('Custom Amount')}
                 </Label>
+                {amountBonusPercent > 0 ? (
+                  <p className='text-muted-foreground -mt-1 text-xs'>
+                    {t('Top-up bonus: {{percent}}% extra balance', {
+                      percent: amountBonusPercent,
+                    })}
+                  </p>
+                ) : null}
                 <div className='grid grid-cols-[minmax(0,1fr)_minmax(110px,0.55fr)] gap-2 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center'>
                   <Input
                     id='topup-amount'

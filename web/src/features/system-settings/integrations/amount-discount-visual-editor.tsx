@@ -29,28 +29,34 @@ import { safeJsonParseWithValidation } from '../utils/json-parser'
 import { isObjectRecord } from '../utils/json-validators'
 import {
   AmountDiscountDialog,
+  type AmountTierKind,
   type AmountDiscountData,
 } from './amount-discount-dialog'
 
 type AmountDiscountVisualEditorProps = {
   value: string
   onChange: (value: string) => void
+  kind?: AmountTierKind
 }
 
 export function AmountDiscountVisualEditor({
   value,
   onChange,
+  kind = 'discount',
 }: AmountDiscountVisualEditorProps) {
   const { t } = useTranslation()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editData, setEditData] = useState<AmountDiscountData | null>(null)
 
-  const discounts = useMemo(() => {
+  const tiers = useMemo(() => {
     const parsed = safeJsonParseWithValidation<Record<string, unknown>>(value, {
       fallback: {},
       validator: isObjectRecord,
-      validatorMessage: 'Amount discount must be a JSON object',
-      context: 'amount discounts',
+      validatorMessage:
+        kind === 'discount'
+          ? 'Amount discount must be a JSON object'
+          : 'Amount bonus must be a JSON object',
+      context: kind === 'discount' ? 'amount discounts' : 'amount bonuses',
     })
 
     return Object.entries(parsed)
@@ -59,12 +65,14 @@ export function AmountDiscountVisualEditor({
         discountRate:
           typeof rate === 'number' ? rate : Number.parseFloat(String(rate)),
       }))
-      .filter((item) => !isNaN(item.amount) && !isNaN(item.discountRate))
+      .filter(
+        (item) => !Number.isNaN(item.amount) && !Number.isNaN(item.discountRate)
+      )
       .sort((a, b) => a.amount - b.amount)
-  }, [value])
+  }, [kind, value])
 
   const handleSave = (data: AmountDiscountData) => {
-    const discountObject = safeJsonParseWithValidation<Record<string, unknown>>(
+    const tierObject = safeJsonParseWithValidation<Record<string, unknown>>(
       value,
       {
         fallback: {},
@@ -74,16 +82,16 @@ export function AmountDiscountVisualEditor({
     )
 
     if (editData && editData.amount !== data.amount) {
-      delete discountObject[editData.amount.toString()]
+      delete tierObject[editData.amount.toString()]
     }
 
-    discountObject[data.amount.toString()] = data.discountRate
+    tierObject[data.amount.toString()] = data.discountRate
 
-    onChange(JSON.stringify(discountObject, null, 2))
+    onChange(JSON.stringify(tierObject, null, 2))
   }
 
   const handleDelete = (amount: number) => {
-    const discountObject = safeJsonParseWithValidation<Record<string, unknown>>(
+    const tierObject = safeJsonParseWithValidation<Record<string, unknown>>(
       value,
       {
         fallback: {},
@@ -92,13 +100,13 @@ export function AmountDiscountVisualEditor({
       }
     )
 
-    delete discountObject[amount.toString()]
+    delete tierObject[amount.toString()]
 
-    onChange(JSON.stringify(discountObject, null, 2))
+    onChange(JSON.stringify(tierObject, null, 2))
   }
 
-  const handleEdit = (discount: AmountDiscountData) => {
-    setEditData(discount)
+  const handleEdit = (tier: AmountDiscountData) => {
+    setEditData(tier)
     setDialogOpen(true)
   }
 
@@ -108,17 +116,28 @@ export function AmountDiscountVisualEditor({
   }
 
   const formatPercentage = (rate: number) => {
+    if (kind === 'bonus') return `${rate}%`
     if (rate >= 1) return '0%'
     const discount = Math.round((1 - rate) * 100)
     return `${discount}%`
   }
 
+  const isDiscount = kind === 'discount'
+  const tierLabel = isDiscount ? t('off') : t('Bonus')
+  const description = isDiscount
+    ? t('Configure discount rates based on recharge amounts')
+    : t('Configure bonus percentages based on recharge amounts')
+  const addLabel = isDiscount ? t('Add discount tier') : t('Add bonus tier')
+  const emptyLabel = isDiscount
+    ? t(
+        'No discount tiers configured. Click "Add discount tier" to get started.'
+      )
+    : t('No bonus tiers configured. Click "Add bonus tier" to get started.')
+
   return (
     <div className='space-y-4'>
       <div className='flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
-        <p className='text-muted-foreground text-sm'>
-          {t('Configure discount rates based on recharge amounts')}
-        </p>
+        <p className='text-muted-foreground text-sm'>{description}</p>
         <Button
           type='button'
           onClick={(e) => {
@@ -130,50 +149,52 @@ export function AmountDiscountVisualEditor({
           className='w-full sm:w-auto'
         >
           <Plus className='h-4 w-4 sm:mr-2' />
-          <span className='sm:inline'>{t('Add discount tier')}</span>
+          <span className='sm:inline'>{addLabel}</span>
         </Button>
       </div>
 
-      {discounts.length === 0 ? (
+      {tiers.length === 0 ? (
         <div className='text-muted-foreground rounded-lg border border-dashed p-6 text-center text-sm'>
-          {t(
-            'No discount tiers configured. Click "Add discount tier" to get started.'
-          )}
+          {emptyLabel}
         </div>
       ) : (
         <div className='rounded-md border'>
           {/* Desktop table view */}
           <StaticDataTable
             className='hidden rounded-none border-0 sm:block'
-            data={discounts}
-            getRowKey={(discount) => discount.amount}
+            data={tiers}
+            getRowKey={(tier) => tier.amount}
             columns={[
               {
                 id: 'amount',
                 header: t('Recharge Amount'),
-                cell: (discount) => (
-                  <span className='font-mono text-sm'>${discount.amount}</span>
+                cell: (tier) => (
+                  <span className='font-mono text-sm'>${tier.amount}</span>
                 ),
               },
               {
-                id: 'discount-rate',
-                header: t('Discount Rate'),
-                cell: (discount) => (
+                id: 'tier-rate',
+                header: isDiscount ? t('Discount Rate') : t('Bonus Percentage'),
+                cell: (tier) => (
                   <code className='bg-muted rounded px-1.5 py-0.5 text-sm'>
-                    {discount.discountRate.toFixed(2)}
+                    {isDiscount
+                      ? tier.discountRate.toFixed(2)
+                      : `${tier.discountRate}%`}
                   </code>
                 ),
               },
               {
-                id: 'discount',
-                header: t('Discount'),
-                cell: (discount) => (
+                id: 'tier-value',
+                header: isDiscount ? t('Discount') : t('Bonus'),
+                cell: (tier) => (
                   <StatusBadge
-                    variant={discount.discountRate < 1 ? 'info' : 'neutral'}
+                    variant={
+                      isDiscount && tier.discountRate >= 1 ? 'neutral' : 'info'
+                    }
                     className='font-mono'
                     copyable={false}
                   >
-                    {formatPercentage(discount.discountRate)} {t('off')}
+                    {formatPercentage(tier.discountRate)} {tierLabel}
                   </StatusBadge>
                 ),
               },
@@ -182,13 +203,13 @@ export function AmountDiscountVisualEditor({
                 header: t('Actions'),
                 className: 'text-right',
                 cellClassName: 'text-right',
-                cell: (discount) => (
+                cell: (tier) => (
                   <StaticRowActions
                     editLabel={t('Edit')}
                     deleteLabel={t('Delete')}
                     menuLabel={t('Open menu')}
-                    onEdit={() => handleEdit(discount)}
-                    onDelete={() => handleDelete(discount.amount)}
+                    onEdit={() => handleEdit(tier)}
+                    onDelete={() => handleDelete(tier.amount)}
                   />
                 ),
               },
@@ -197,19 +218,23 @@ export function AmountDiscountVisualEditor({
 
           {/* Mobile card view */}
           <div className='divide-y sm:hidden'>
-            {discounts.map((discount) => (
-              <div key={discount.amount} className='p-4'>
+            {tiers.map((tier) => (
+              <div key={tier.amount} className='p-4'>
                 <div className='mb-3 flex items-start justify-between'>
                   <div className='flex-1'>
                     <div className='mb-2 font-mono text-base font-medium'>
-                      ${discount.amount}
+                      ${tier.amount}
                     </div>
                     <StatusBadge
-                      variant={discount.discountRate < 1 ? 'info' : 'neutral'}
+                      variant={
+                        isDiscount && tier.discountRate >= 1
+                          ? 'neutral'
+                          : 'info'
+                      }
                       className='font-mono'
                       copyable={false}
                     >
-                      {formatPercentage(discount.discountRate)} {t('off')}
+                      {formatPercentage(tier.discountRate)} {tierLabel}
                     </StatusBadge>
                   </div>
                   <div className='flex gap-1'>
@@ -220,7 +245,7 @@ export function AmountDiscountVisualEditor({
                       onClick={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
-                        handleEdit(discount)
+                        handleEdit(tier)
                       }}
                     >
                       <Pencil className='h-4 w-4' />
@@ -232,7 +257,7 @@ export function AmountDiscountVisualEditor({
                       onClick={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
-                        handleDelete(discount.amount)
+                        handleDelete(tier.amount)
                       }}
                     >
                       <Trash2 className='h-4 w-4' />
@@ -241,10 +266,14 @@ export function AmountDiscountVisualEditor({
                 </div>
                 <div className='text-sm'>
                   <span className='text-muted-foreground'>
-                    {t('Discount Rate:')}{' '}
+                    {isDiscount
+                      ? t('Discount Rate:')
+                      : t('Bonus Percentage:')}{' '}
                   </span>
                   <code className='bg-muted rounded px-1.5 py-0.5 text-xs'>
-                    {discount.discountRate.toFixed(2)}
+                    {isDiscount
+                      ? tier.discountRate.toFixed(2)
+                      : `${tier.discountRate}%`}
                   </code>
                 </div>
               </div>
@@ -258,6 +287,7 @@ export function AmountDiscountVisualEditor({
         onOpenChange={setDialogOpen}
         onSave={handleSave}
         editData={editData}
+        kind={kind}
       />
     </div>
   )

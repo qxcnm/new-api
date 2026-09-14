@@ -187,7 +187,7 @@ describe('user settings saves across profile and security', () => {
     await waitFor(() => expect(onUpdate).toHaveBeenCalled())
     expect(put).toHaveBeenCalledWith('/api/user/setting', {
       ...settings,
-      quota_warning_threshold: 2700,
+      quota_warning_threshold: 1_350_000_000,
       record_ip_log: false,
     })
   })

@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
@@ -62,6 +63,29 @@ func topUpQuotaMaxCurrent(creditedQuota int) (int, error) {
 		return 0, ErrInvalidTopUpQuota
 	}
 	return common.MaxWalletQuota - creditedQuota, nil
+}
+
+// applyTopUpBonus adds the configured amount-based percentage to a paid
+// top-up's base quota. Redemption codes already contain their final quota and
+// must not use this helper.
+func applyTopUpBonus(quota decimal.Decimal, rechargeAmount float64) decimal.Decimal {
+	bonusPercent := operation_setting.GetTopUpBonusPercent(rechargeAmount)
+	if bonusPercent == 0 {
+		return quota
+	}
+	return quota.Mul(decimal.NewFromInt(100).Add(decimal.NewFromFloat(bonusPercent))).Div(decimal.NewFromInt(100))
+}
+
+// TopUpQuotaWithBonus converts a paid top-up's base quota into the amount that
+// should be credited after applying the configured amount-based bonus. Callers
+// that do not have a user-facing recharge amount leave it omitted, which keeps
+// the bonus disabled rather than guessing from the stored quota units.
+func TopUpQuotaWithBonus(quota decimal.Decimal, rechargeAmounts ...float64) (int, error) {
+	rechargeAmount := 0.0
+	if len(rechargeAmounts) > 0 {
+		rechargeAmount = rechargeAmounts[0]
+	}
+	return common.WalletQuotaFromDecimalStrict(applyTopUpBonus(quota, rechargeAmount))
 }
 
 // ValidateTopUpQuotaCapacity performs the user-facing pre-payment check. The
@@ -203,8 +227,9 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, callerIp string) (
 			topUp.PaymentMethod = actualPaymentMethod
 		}
 		var quotaErr error
-		quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(
+		quotaToAdd, quotaErr = TopUpQuotaWithBonus(
 			decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+			float64(topUp.Amount),
 		)
 		if quotaErr != nil || quotaToAdd <= 0 {
 			return ErrInvalidTopUpQuota
@@ -266,8 +291,9 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 			return err
 		}
 
-		quota, err = common.WalletQuotaFromDecimalStrict(
+		quota, err = TopUpQuotaWithBonus(
 			decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+			float64(topUp.Amount),
 		)
 		if err != nil || quota <= 0 {
 			return ErrInvalidTopUpQuota
@@ -479,15 +505,24 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 
 		// 计算应充值额度：
 		// - Stripe 订单：Money 代表经分组倍率换算后的美元数量，直接 * QuotaPerUnit
+		// - Creem 订单：Amount 已是产品配置的最终额度，不再乘 QuotaPerUnit
 		// - 其他订单（如易支付）：Amount 为美元数量，* QuotaPerUnit
 		var quotaErr error
-		if topUp.PaymentProvider == PaymentProviderStripe {
-			quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(
+		switch topUp.PaymentProvider {
+		case PaymentProviderStripe:
+			quotaToAdd, quotaErr = TopUpQuotaWithBonus(
 				decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+				float64(topUp.Amount),
 			)
-		} else {
-			quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(
+		case PaymentProviderCreem:
+			quotaToAdd, quotaErr = TopUpQuotaWithBonus(
+				decimal.NewFromInt(topUp.Amount),
+				topUp.Money,
+			)
+		default:
+			quotaToAdd, quotaErr = TopUpQuotaWithBonus(
 				decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+				float64(topUp.Amount),
 			)
 		}
 		if quotaErr != nil || quotaToAdd <= 0 {
@@ -556,7 +591,7 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 		}
 
 		// Creem 直接使用 Amount 作为充值额度（整数）
-		quota, err = common.WalletQuotaFromDecimalStrict(decimal.NewFromInt(topUp.Amount))
+		quota, err = TopUpQuotaWithBonus(decimal.NewFromInt(topUp.Amount), topUp.Money)
 		if err != nil || quota <= 0 {
 			return ErrInvalidTopUpQuota
 		}
@@ -624,8 +659,9 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 			return errors.New("充值订单状态错误")
 		}
 
-		quotaToAdd, err = common.WalletQuotaFromDecimalStrict(
+		quotaToAdd, err = TopUpQuotaWithBonus(
 			decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+			float64(topUp.Amount),
 		)
 		if err != nil || quotaToAdd <= 0 {
 			return ErrInvalidTopUpQuota
@@ -684,8 +720,9 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 			return errors.New("充值订单状态错误")
 		}
 
-		quotaToAdd, err = common.WalletQuotaFromDecimalStrict(
+		quotaToAdd, err = TopUpQuotaWithBonus(
 			decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+			float64(topUp.Amount),
 		)
 		if err != nil || quotaToAdd <= 0 {
 			return ErrInvalidTopUpQuota
