@@ -509,6 +509,11 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 			}
 		}
 	}
+	if isAdd {
+		if err := validateChannelModelGroups(channel); err != nil {
+			return err
+		}
+	}
 
 	// VertexAI 特殊校验
 	if channel.Type == constant.ChannelTypeVertexAi {
@@ -546,6 +551,39 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 		}
 	}
 
+	return nil
+}
+
+func validateChannelModelGroups(channel *model.Channel) error {
+	bindings, err := channel.GetModelGroups()
+	if err != nil {
+		return err
+	}
+	models := make(map[string]bool)
+	for _, modelName := range channel.GetModels() {
+		models[modelName] = true
+	}
+	groups := make(map[string]bool)
+	for _, group := range channel.GetGroups() {
+		groups[group] = true
+	}
+	for modelName, modelGroups := range bindings {
+		if !models[modelName] {
+			return fmt.Errorf("model_groups model %q must also be listed in models", modelName)
+		}
+		for _, group := range modelGroups {
+			if !groups[group] {
+				return fmt.Errorf("model_groups model %q references group %q not present in channel group", modelName, group)
+			}
+		}
+	}
+	if len(bindings) > 0 {
+		encoded, err := common.Marshal(bindings)
+		if err != nil {
+			return err
+		}
+		channel.ModelGroups = common.GetPointer(string(encoded))
+	}
 	return nil
 }
 
@@ -740,6 +778,7 @@ func AddChannel(c *gin.Context) {
 		createAudit["base_url_source"] = "plugin_default"
 	}
 	recordManageAudit(c, "channel.create", createAudit)
+	model.InitChannelCache()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -996,6 +1035,9 @@ func UpdateChannel(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
+	if value, provided := requestData["model_groups"]; provided && value == nil {
+		channel.ModelGroups = common.GetPointer("")
+	}
 	clearChannelReadOnlyFields(&channel, requestData)
 
 	if channel.Type == constant.ChannelTypeTaskPlugin &&
@@ -1025,6 +1067,22 @@ func UpdateChannel(c *gin.Context) {
 			"message": err.Error(),
 		})
 		return
+	}
+	// Validate explicit bindings against the effective routing fields of the
+	// patch. Omitted bindings stay in storage, including retired model entries.
+	if channel.ModelGroups != nil {
+		routing := channel.Channel
+		if routing.Models == "" {
+			routing.Models = originChannel.Models
+		}
+		if routing.Group == "" {
+			routing.Group = originChannel.Group
+		}
+		if err := validateChannelModelGroups(&routing); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		channel.ModelGroups = routing.ModelGroups
 	}
 	originProxy := originChannel.GetSetting().Proxy
 	proxyChanged := false
@@ -1148,6 +1206,9 @@ func UpdateChannel(c *gin.Context) {
 	}
 	if channel.Group != originChannel.Group {
 		changedFields = append(changedFields, "group")
+	}
+	if !equalStringPtr(channel.ModelGroups, originChannel.ModelGroups) {
+		changedFields = append(changedFields, "model_groups")
 	}
 	if channel.Type != originChannel.Type {
 		changedFields = append(changedFields, "type")

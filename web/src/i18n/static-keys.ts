@@ -19,6 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  // Per-model channel group bindings and form validation.
+  'Bind each model on this channel to the groups that may use it. Models without an entry keep the legacy channel groups.',
+  'Model groups must be a JSON object with string arrays',
+  'Model group bindings must reference models in this channel',
+  'Select at least one group for each model, or use channel groups',
+  'Model group bindings must use groups selected for this channel',
   'For this channel, map the model name in client requests to the model name sent upstream.',
   // Channel provider labels, descriptions and presentation badges.
   'Zhipu GLM',

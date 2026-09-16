@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 
@@ -112,6 +113,22 @@ func TestValidateChannelRequiresNewAPIBaseURL(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestValidateChannelModelGroupsRequiresKnownModelsAndGroups(t *testing.T) {
+	base := func(modelGroups string) *model.Channel {
+		return &model.Channel{
+			Type:        constant.ChannelTypeOpenAI,
+			Models:      "gpt-4o,claude-3",
+			Group:       "default,vip",
+			ModelGroups: &modelGroups,
+		}
+	}
+
+	require.NoError(t, validateChannelModelGroups(base(`{"gpt-4o":["default"],"claude-3":["vip"]}`)))
+	require.ErrorContains(t, validateChannelModelGroups(base(`{"unknown":["default"]}`)), "must also be listed")
+	require.ErrorContains(t, validateChannelModelGroups(base(`{"gpt-4o":["staff"]}`)), "not present in channel group")
+	require.Error(t, validateChannelModelGroups(base(`{"gpt-4o":`)))
 }
 
 func TestNewAPIChannelRegistration(t *testing.T) {
@@ -492,4 +509,70 @@ func TestTestAllChannelsRejectsExistingActiveTask(t *testing.T) {
 	require.Equal(t, http.StatusConflict, recorder.Code)
 	require.Contains(t, recorder.Body.String(), existing.TaskID)
 	require.Contains(t, recorder.Body.String(), "已有通道测试任务正在运行或等待中")
+}
+
+// Exercise management JSON and immediate routing on all supported databases.
+func TestChannelModelGroupsManagementDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			common.MemoryCacheEnabled = true
+			bindings := `{"gpt-4o":["vip"],"gpt-4o-mini":["default"]}`
+			var response struct {
+				Success bool
+				Message string
+				Data    model.Channel
+			}
+			modelManagementRequest(t, AddChannel, http.MethodPost, "/api/channel", map[string]any{
+				"mode": "single", "channel": map[string]any{
+					"name": "one provider", "type": constant.ChannelTypeOpenAI,
+					"key": "fixture-key", "models": "gpt-4o,gpt-4o-mini", "group": "default,vip", "model_groups": bindings,
+				},
+			}, &response)
+			require.True(t, response.Success, response.Message)
+			var stored model.Channel
+			require.NoError(t, db.First(&stored).Error)
+			assert.Equal(t, bindings, *stored.ModelGroups)
+			assert.True(t, model.IsChannelEnabledForGroupModel("vip", "gpt-4o", stored.Id))
+			assert.False(t, model.IsChannelEnabledForGroupModel("default", "gpt-4o", stored.Id))
+
+			for _, patch := range []map[string]any{
+				{"name": "renamed"},                      // omitted bindings must be retained
+				{"model_groups": `{"gpt-4o":[" vip "]}`}, // normalize without models/group in patch
+			} {
+				patch["id"] = stored.Id
+				modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel", patch, &response)
+				require.True(t, response.Success, response.Message)
+				assert.Empty(t, response.Data.Key)
+				assert.False(t, model.IsChannelEnabledForGroupModel("default", "gpt-4o", stored.Id))
+			}
+			for _, invalid := range []string{
+				`{"unknown":["default"]}`, `{" gpt-4o":["default"]}`,
+				`{"gpt-4o":["unknown"]}`, `{"gpt-4o":[]}`, `null`,
+			} {
+				modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel", map[string]any{
+					"id": stored.Id, "name": "must not save", "model_groups": invalid,
+				}, &response)
+				require.False(t, response.Success, invalid)
+				require.NoError(t, db.First(&stored, stored.Id).Error)
+				assert.Equal(t, "renamed", stored.Name)
+				assert.False(t, model.IsChannelEnabledForGroupModel("default", "gpt-4o", stored.Id))
+			}
+			for _, clear := range []any{"", nil, "{}"} {
+				modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel", map[string]any{
+					"id": stored.Id, "model_groups": bindings,
+				}, &response)
+				require.True(t, response.Success, response.Message)
+				modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel", map[string]any{
+					"id": stored.Id, "model_groups": clear,
+				}, &response)
+				require.True(t, response.Success, response.Message)
+				assert.True(t, model.IsChannelEnabledForGroupModel("default", "gpt-4o", stored.Id))
+				assert.True(t, model.IsChannelEnabledForGroupModel("vip", "gpt-4o-mini", stored.Id))
+			}
+		})
+	}
 }

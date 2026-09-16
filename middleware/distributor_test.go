@@ -7,16 +7,150 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	taskdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	kittypes "github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/model_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDistributePinnedChannelModelGroups(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	originalMemory := common.MemoryCacheEnabled
+	originalUsableGroups := setting.UserUsableGroups2JSONString()
+	originalGroupRatios := ratio_setting.GroupRatio2JSONString()
+	originalModelRatios := ratio_setting.ModelRatio2JSONString()
+	originalPreConsumed := common.PreConsumedQuota
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled = originalMemory
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(originalUsableGroups))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(originalGroupRatios))
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(originalModelRatios))
+		common.PreConsumedQuota = originalPreConsumed
+	})
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"Default","vip":"VIP"}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"vip":0.5}`))
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"bound-model":2}`))
+	common.PreConsumedQuota = 100
+
+	tests := []struct {
+		name      string
+		bindings  string
+		models    string
+		modelName string
+		group     string
+		autoGroup string
+		allowed   bool
+	}{
+		{name: "explicit allowed group", bindings: `{"bound-model":["vip"]}`, modelName: "bound-model", group: "vip", allowed: true},
+		{name: "explicit denied group", bindings: `{"bound-model":["vip"]}`, modelName: "bound-model", group: "default"},
+		{name: "auto chooses bound group", bindings: `{"bound-model":["vip"]}`, modelName: "bound-model", group: "auto", autoGroup: "vip", allowed: true},
+		{name: "auto chooses default group", bindings: `{"bound-model":["default"]}`, modelName: "bound-model", group: "auto", autoGroup: "default", allowed: true},
+		{name: "normalized model remains restricted", bindings: `{"bound-model":["vip"]}`, modelName: "bound-model@thinking:on", group: "default"},
+		{name: "advertised exact variant inherits groups", bindings: `{"bound-model":["vip"]}`, models: "bound-model,bound-model@thinking:on", modelName: "bound-model@thinking:on", group: "default", allowed: true},
+		{name: "stale group does not grant access", bindings: `{"bound-model":["removed"]}`, modelName: "bound-model", group: "removed"},
+		{name: "invalid configuration fails closed", bindings: `{"bound-model":`, modelName: "bound-model", group: "vip"},
+		{name: "legacy origin model remains usable", modelName: "unadvertised-origin-model", group: "legacy-group", allowed: true},
+		{name: "unbound origin model remains usable", bindings: `{"bound-model":["vip"]}`, modelName: "unadvertised-origin-model", group: "legacy-group", allowed: true},
+	}
+	for _, source := range []taskdto.ChannelPinSource{taskdto.PinSourceToken, taskdto.PinSourceOriginTask} {
+		for _, cached := range []bool{false, true} {
+			for _, test := range tests {
+				t.Run(fmt.Sprintf("%s/cache_%t/%s", source, cached, test.name), func(t *testing.T) {
+					setupOriginTaskDB(t)
+					common.MemoryCacheEnabled = cached
+					require.NoError(t, model.DB.AutoMigrate(&model.Ability{}))
+					channel := model.Channel{
+						Name: "Bound pin", Type: constant.ChannelTypeOpenAI, Key: "fixture-key",
+						Status: common.ChannelStatusEnabled, Models: "bound-model", Group: "default,vip",
+						ModelGroups: common.GetPointer(test.bindings),
+					}
+					if test.models != "" {
+						channel.Models = test.models
+					}
+					require.NoError(t, model.DB.Create(&channel).Error)
+					if cached {
+						model.InitChannelCache()
+					}
+					recorder := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(recorder)
+					c.Request = httptest.NewRequest(http.MethodPost, "/vendor/jobs", strings.NewReader(`{}`))
+					c.Request.Header.Set("Content-Type", "application/json")
+					c.Set("resolved_task_model", test.modelName)
+					common.SetContextKey(c, constant.ContextKeyUsingGroup, test.group)
+					common.SetContextKey(c, constant.ContextKeyTokenAutoGroups, []string{"default", "vip"})
+					common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+					service.GetChannelConstraints(c).AddPin(taskdto.ChannelPin{ChannelId: channel.Id, Source: source})
+					Distribute()(c)
+					assert.Equal(t, !test.allowed, c.IsAborted(), recorder.Body.String())
+					if !test.allowed {
+						assert.Equal(t, http.StatusForbidden, recorder.Code)
+						assert.Zero(t, common.GetContextKeyInt(c, constant.ContextKeyChannelId))
+						return
+					}
+					assert.Equal(t, channel.Id, common.GetContextKeyInt(c, constant.ContextKeyChannelId))
+					assert.Equal(t, test.autoGroup, common.GetContextKeyString(c, constant.ContextKeyAutoGroup))
+					if test.autoGroup != "" {
+						info := &relaycommon.RelayInfo{OriginModelName: test.modelName, UsingGroup: test.group, UserGroup: "binding-test-user"}
+						price, err := helper.ModelPriceHelper(c, info, 200, &kittypes.TokenCountMeta{})
+						require.NoError(t, err)
+						assert.Equal(t, test.autoGroup, info.UsingGroup)
+						if test.autoGroup == "vip" {
+							assert.Equal(t, 0.5, price.GroupRatioInfo.GroupRatio)
+							assert.Equal(t, 200, price.QuotaToPreConsume)
+						} else {
+							assert.Equal(t, 1.0, price.GroupRatioInfo.GroupRatio)
+							assert.Equal(t, 400, price.QuotaToPreConsume)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestDistributeStopsWhenSelectedChannelSetupFails(t *testing.T) {
+	setupOriginTaskDB(t)
+	originalMemory, originalRedis := common.MemoryCacheEnabled, common.RedisEnabled
+	common.MemoryCacheEnabled, common.RedisEnabled = false, false
+	t.Cleanup(func() { common.MemoryCacheEnabled, common.RedisEnabled = originalMemory, originalRedis })
+	channel := model.Channel{
+		Name: "Unavailable keys", Type: constant.ChannelTypeOpenAI, Key: "disabled-fixture-key",
+		Status: common.ChannelStatusEnabled,
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey: true, MultiKeyStatusList: map[int]int{0: common.ChannelStatusManuallyDisabled},
+		},
+	}
+	require.NoError(t, model.DB.Create(&channel).Error)
+	nextCalled := false
+	router := gin.New()
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		service.GetChannelConstraints(c).AddPin(taskdto.ChannelPin{ChannelId: channel.Id, Source: taskdto.PinSourceToken})
+		c.Next()
+	}, Distribute(), func(c *gin.Context) {
+		nextCalled = true
+		c.Status(http.StatusNoContent)
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"bound-model"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	assert.False(t, nextCalled)
+	assert.Equal(t, http.StatusInternalServerError, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), string(kittypes.ErrorCodeChannelNoAvailableKey))
+}
 
 func TestChannelMatchesExpectedTaskPluginUsesGenericChannelSetting(t *testing.T) {
 	channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin}

@@ -24,6 +24,31 @@ func GetChannelConstraints(c *gin.Context) *dto.ChannelConstraints {
 	return constraints
 }
 
+// ApplyChannelModelGroup checks explicit model bindings and resolves the billing
+// group for an auto-group pin. An already selected group stays fixed on retry.
+func ApplyChannelModelGroup(c *gin.Context, channel *model.Channel, modelName string) bool {
+	group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+	if group != "auto" {
+		return model.ChannelAllowsModelGroup(channel, group, modelName)
+	}
+	if selectedGroup := common.GetContextKeyString(c, constant.ContextKeyAutoGroup); selectedGroup != "" {
+		return model.ChannelAllowsModelGroup(channel, selectedGroup, modelName)
+	}
+	// An empty group can only pass when this model has no explicit restriction.
+	// Keep the existing behavior of legacy pins in that case.
+	if model.ChannelAllowsModelGroup(channel, "", modelName) {
+		return true
+	}
+	userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+	for _, candidate := range GetRequestAutoGroups(c, userGroup) {
+		if model.ChannelAllowsModelGroup(channel, candidate, modelName) {
+			common.SetContextKey(c, constant.ContextKeyAutoGroup, candidate)
+			return true
+		}
+	}
+	return false
+}
+
 func AppendTaskPluginIdentityFilter(c *gin.Context, pluginKey string) {
 	if c == nil {
 		return

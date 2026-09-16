@@ -95,6 +95,9 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	if ch.Status != common.ChannelStatusEnabled {
 		return service.TaskErrorWrapperLocal(errors.New("the channel of the origin task is disabled"), "task_channel_disable", http.StatusBadRequest)
 	}
+	if !service.ApplyChannelModelGroup(c, ch, info.OriginModelName) {
+		return service.TaskErrorWrapperLocal(errors.New("the origin task channel does not allow this model in the requested group"), "origin_task_model_group_forbidden", http.StatusForbidden)
+	}
 	info.LockedChannel = ch
 
 	if originTask.ChannelId != info.ChannelId {
@@ -181,6 +184,9 @@ func ApplyChannelPin(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError
 	}
 	if ch.Status != common.ChannelStatusEnabled {
 		return service.TaskErrorWrapperLocal(errors.New("the channel of the origin task is disabled"), "origin_task_channel_disabled", http.StatusBadRequest)
+	}
+	if !service.ApplyChannelModelGroup(c, ch, info.OriginModelName) {
+		return service.TaskErrorWrapperLocal(errors.New("the origin task channel does not allow this model in the requested group"), "origin_task_model_group_forbidden", http.StatusForbidden)
 	}
 	info.LockedChannel = ch
 	return nil

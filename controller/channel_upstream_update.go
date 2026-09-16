@@ -48,6 +48,7 @@ var channelUpstreamModelUpdateSelectFields = []string{
 	"status",
 	"base_url",
 	"models",
+	"model_groups",
 	"model_mapping",
 	"settings",
 	"setting",

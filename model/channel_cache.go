@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -33,7 +32,10 @@ func InitChannelCache() {
 	newChannelId2channel := make(map[int]*Channel)
 	newChannel2advancedCustomConfig := make(map[int]*kitdto.AdvancedCustomConfig)
 	var channels []*Channel
-	DB.Find(&channels)
+	if err := DB.Find(&channels).Error; err != nil {
+		common.SysError("load channels for cache: " + err.Error())
+		return
+	}
 	for _, channel := range channels {
 		newChannelId2channel[channel.Id] = channel
 		if channel.Type == constant.ChannelTypeAdvancedCustom {
@@ -43,29 +45,40 @@ func InitChannelCache() {
 		}
 	}
 	var abilities []*Ability
-	DB.Find(&abilities)
-	groups := make(map[string]bool)
-	for _, ability := range abilities {
-		groups[ability.Group] = true
+	if err := DB.Find(&abilities).Error; err != nil {
+		common.SysError("load abilities for cache: " + err.Error())
+		return
 	}
-	newGroup2model2channels := make(map[string]map[string][]int)
-	for group := range groups {
-		newGroup2model2channels[group] = make(map[string][]int)
+	// Check persisted abilities against the current channel restrictions. This
+	// also keeps stale abilities or malformed configurations from widening access.
+	type routeKey struct {
+		channelID int
+		group     string
+		model     string
 	}
+	allowed := make(map[routeKey]bool)
 	for _, channel := range channels {
 		if channel.Status != common.ChannelStatusEnabled {
-			continue // skip disabled channels
+			continue
 		}
-		groups := strings.SplitSeq(channel.Group, ",")
-		for group := range groups {
-			models := channel.GetModels()
-			for _, model := range models {
-				if _, ok := newGroup2model2channels[group][model]; !ok {
-					newGroup2model2channels[group][model] = make([]int, 0)
-				}
-				newGroup2model2channels[group][model] = append(newGroup2model2channels[group][model], channel.Id)
-			}
+		routes, err := channel.buildAbilities()
+		if err != nil {
+			common.SysError(fmt.Sprintf("invalid model groups for channel %d: %v", channel.Id, err))
+			continue
 		}
+		for _, route := range routes {
+			allowed[routeKey{channel.Id, route.Group, route.Model}] = true
+		}
+	}
+	newGroup2model2channels := make(map[string]map[string][]int)
+	for _, ability := range abilities {
+		if !ability.Enabled || !allowed[routeKey{ability.ChannelId, ability.Group, ability.Model}] {
+			continue
+		}
+		if newGroup2model2channels[ability.Group] == nil {
+			newGroup2model2channels[ability.Group] = make(map[string][]int)
+		}
+		newGroup2model2channels[ability.Group][ability.Model] = append(newGroup2model2channels[ability.Group][ability.Model], ability.ChannelId)
 	}
 
 	// sort by priority
@@ -114,6 +127,19 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
+// filterModelGroupCandidates applies bindings to the requested model before
+// selection, including when candidate IDs came from a normalized model name.
+// The caller holds channelSyncLock.
+func filterModelGroupCandidates(ids []int, group, modelName string) []int {
+	allowed := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if ChannelAllowsModelGroup(channelsIDM[id], group, modelName) {
+			allowed = append(allowed, id)
+		}
+	}
+	return allowed
+}
+
 func GetRandomSatisfiedChannel(
 	group string,
 	model string,
@@ -129,12 +155,12 @@ func GetRandomSatisfiedChannel(
 	defer channelSyncLock.RUnlock()
 
 	// First, try to find channels with the exact model name.
-	channels, _ := filterCandidateIDs(group2model2channels[group][model], model, filters)
+	channels, _ := filterCandidateIDs(filterModelGroupCandidates(group2model2channels[group][model], group, model), model, filters)
 
 	// If no channels found, try to find channels with the normalized model name.
 	if len(channels) == 0 {
 		normalizedModel := ratio_setting.RoutingMatchModelName(model)
-		channels, _ = filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
+		channels, _ = filterCandidateIDs(filterModelGroupCandidates(group2model2channels[group][normalizedModel], group, model), model, filters)
 	}
 
 	if len(channels) == 0 {

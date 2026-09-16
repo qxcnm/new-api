@@ -12,7 +12,6 @@ import (
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
-	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -22,6 +21,8 @@ func setupChannelSelectAutoGroupsTest(t *testing.T) *gorm.DB {
 	t.Helper()
 
 	originalDB := model.DB
+	originalSQLitePath, originalMaster := common.SQLitePath, common.IsMasterNode
+	originalMainType, originalLogType := common.MainDatabaseType(), common.LogDatabaseType()
 	originalMemoryCacheEnabled := common.MemoryCacheEnabled
 	originalRetryTimes := common.RetryTimes
 	originalAutoGroups := setting.AutoGroups2JsonString()
@@ -30,8 +31,11 @@ func setupChannelSelectAutoGroupsTest(t *testing.T) *gorm.DB {
 	originalMaxTokenAutoGroups := setting.GetMaxTokenAutoGroups()
 
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	require.NoError(t, err)
+	common.SQLitePath, common.IsMasterNode = dsn, false
+	t.Setenv("SQL_DSN", "local")
+	t.Setenv("LOG_SQL_DSN", "")
+	require.NoError(t, model.InitDB())
+	db := model.DB
 	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
 	model.DB = db
 	common.MemoryCacheEnabled = true
@@ -44,6 +48,8 @@ func setupChannelSelectAutoGroupsTest(t *testing.T) *gorm.DB {
 
 	t.Cleanup(func() {
 		model.DB = originalDB
+		common.SQLitePath, common.IsMasterNode = originalSQLitePath, originalMaster
+		common.SetDatabaseTypes(originalMainType, originalLogType)
 		common.MemoryCacheEnabled = originalMemoryCacheEnabled
 		common.RetryTimes = originalRetryTimes
 		require.NoError(t, setting.UpdateAutoGroupsByJsonString(originalAutoGroups))
@@ -126,4 +132,39 @@ func TestCacheGetRandomSatisfiedChannelUsesTokenAutoGroupsWhenGlobalAutoIsEmpty(
 	assert.Equal(t, 2102, second.Id)
 	assert.Equal(t, "default", selectedGroup)
 	assert.Equal(t, "default", common.GetContextKeyString(ctx, constant.ContextKeyAutoGroup))
+}
+
+func TestChannelSelectionRejectsStaleModelGroupAbility(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cache_%t", cached), func(t *testing.T) {
+			db := setupChannelSelectAutoGroupsTest(t)
+			common.MemoryCacheEnabled = cached
+			const requestedModel = "bound-model@thinking:on"
+			channel := model.Channel{
+				Name: "Restricted route", Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled,
+				Models: "bound-model," + requestedModel, Group: "default,vip",
+				ModelGroups: common.GetPointer(`{"bound-model":["default"],"bound-model@thinking:on":["vip"]}`),
+			}
+			require.NoError(t, db.Create(&channel).Error)
+			require.NoError(t, channel.AddAbilities(db))
+			require.NoError(t, db.Create(&model.Ability{Group: "default", Model: requestedModel, ChannelId: channel.Id, Enabled: true}).Error)
+			model.InitChannelCache()
+			assert.False(t, model.IsChannelEnabledForGroupModel("default", requestedModel, channel.Id), "affinity must reject stale abilities and normalized fallback")
+			assert.True(t, model.IsChannelEnabledForGroupModel("vip", requestedModel, channel.Id))
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+			common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "auto")
+			common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"default", "vip"})
+			selected, group, err := CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: ctx, ModelName: requestedModel, TokenGroup: "auto"})
+			require.NoError(t, err)
+			require.NotNil(t, selected)
+			assert.Equal(t, channel.Id, selected.Id)
+			assert.Equal(t, "vip", group)
+			assert.Equal(t, "vip", common.GetContextKeyString(ctx, constant.ContextKeyAutoGroup))
+			assert.True(t, ApplyChannelModelGroup(ctx, selected, requestedModel))
+			changed := *selected
+			changed.ModelGroups = common.GetPointer(`{"bound-model@thinking:on":["default"]}`)
+			assert.False(t, ApplyChannelModelGroup(ctx, &changed, requestedModel), "a locked retry cannot silently change the billed group")
+		})
+	}
 }

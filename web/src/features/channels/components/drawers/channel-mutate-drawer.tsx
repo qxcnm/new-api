@@ -202,6 +202,7 @@ import {
 } from '../dialogs/missing-models-confirmation-dialog'
 import { ParamOverrideEditorDialog } from '../dialogs/param-override-editor-dialog'
 import { StatusCodeRiskDialog } from '../dialogs/status-code-risk-dialog'
+import { ModelGroupsEditor } from '../model-groups-editor'
 import { ModelMappingEditor } from '../model-mapping-editor'
 import { UpstreamModelSelection } from '../upstream-model-selection'
 import {
@@ -3012,6 +3013,34 @@ export function ChannelMutateDrawer({
                         placeholder={t(FIELD_PLACEHOLDERS.GROUP)}
                       />
                     )}
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+
+          <div className='border-border/60 rounded-lg border p-4'>
+            <FormField
+              control={form.control}
+              name='model_groups'
+              render={({ field }) => (
+                <FormItem className='space-y-3'>
+                  <div className='space-y-1'>
+                    <FormLabel>{t('Model groups')}</FormLabel>
+                    <FormDescription>
+                      {t(FIELD_DESCRIPTIONS.MODEL_GROUPS)}
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <div>
+                      <ModelGroupsEditor
+                        value={field.value || ''}
+                        onChange={field.onChange}
+                        models={currentModelsArray}
+                        groups={currentGroups}
+                      />
+                    </div>
                   </FormControl>
                   <FormMessage />
                 </FormItem>

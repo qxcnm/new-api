@@ -33,6 +33,11 @@ import (
 func modelManagementDB(t *testing.T, kind, dsn string) *gorm.DB {
 	t.Helper()
 	database, isolatedDSN := newAuditTestDatabase(t, kind, dsn)
+	// InitDB opens the isolated database again. Close this setup connection
+	// first so Windows can remove the SQLite fixture during cleanup.
+	setupConnection, err := database.DB()
+	require.NoError(t, err)
+	require.NoError(t, setupConnection.Close())
 	previousDB, previousLogDB := model.DB, model.LOG_DB
 	previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
 	previousMaster, previousSQLite := common.IsMasterNode, common.SQLitePath
@@ -1324,9 +1329,10 @@ func TestModelDeletionDatabaseMatrix(t *testing.T) {
 					require.NoError(t, first.Insert())
 					require.NoError(t, second.Insert())
 					mapping := `{"` + name + `":"upstream-name"}`
+					modelGroups := `{"` + name + `":["default"],"` + name + `-keep":["default"]}`
 					priority, weight := int64(7), uint(9)
 					channels := []model.Channel{
-						{Name: "Enabled", Type: 1, Key: "fixture-key", Models: name + "," + name + "-keep," + second.ModelName, Group: "default,vip", Status: common.ChannelStatusEnabled, ModelMapping: &mapping, Priority: &priority, Weight: &weight},
+						{Name: "Enabled", Type: 1, Key: "fixture-key", Models: name + "," + name + "-keep," + second.ModelName, Group: "default,vip", ModelGroups: &modelGroups, Status: common.ChannelStatusEnabled, ModelMapping: &mapping, Priority: &priority, Weight: &weight},
 						{Name: "Disabled", Type: 1, Models: name + ",prefix-" + name, Group: "disabled-group", Status: common.ChannelStatusManuallyDisabled},
 						{Name: "Last model", Type: 1, Models: name, Group: "last-model-group", Status: common.ChannelStatusEnabled},
 						{Name: "Case-sensitive name", Type: 1, Models: strings.ToUpper(name), Group: "case-group", Status: common.ChannelStatusEnabled},
@@ -1391,12 +1397,13 @@ func TestModelDeletionDatabaseMatrix(t *testing.T) {
 					}
 					var abilities []model.Ability
 					require.NoError(t, db.Where("channel_id IN ?", []int{channels[0].Id, channels[1].Id, channels[2].Id, channels[3].Id}).Find(&abilities).Error)
-					assert.Len(t, abilities, 4)
+					assert.Len(t, abilities, 3)
 					for _, ability := range abilities {
 						assert.NotEqual(t, name, ability.Model)
 						assert.NotEqual(t, second.ModelName, ability.Model)
 						assert.NotEmpty(t, ability.Model)
 						if ability.ChannelId == channels[0].Id {
+							assert.Equal(t, "default", ability.Group)
 							assert.Equal(t, &priority, ability.Priority)
 							assert.Equal(t, weight, ability.Weight)
 							assert.True(t, ability.Enabled)
@@ -1412,6 +1419,9 @@ func TestModelDeletionDatabaseMatrix(t *testing.T) {
 					cached, err = model.GetRandomSatisfiedChannel("default", name+"-keep", 0, nil)
 					require.NoError(t, err)
 					require.NotNil(t, cached)
+					cached, err = model.GetRandomSatisfiedChannel("vip", name+"-keep", 0, nil)
+					require.NoError(t, err)
+					assert.Nil(t, cached, "deleting another model preserves the remaining model's group restriction")
 					pricingAfter, err := model.GetModelPricingSnapshot([]string{name, second.ModelName})
 					require.NoError(t, err)
 					assert.Equal(t, pricingBefore, pricingAfter)

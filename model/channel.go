@@ -40,8 +40,13 @@ type Channel struct {
 	BalanceUpdatedTime int64   `json:"balance_updated_time" gorm:"bigint"`
 	Models             string  `json:"models"`
 	Group              string  `json:"group" gorm:"type:varchar(64);default:'default'"`
-	UsedQuota          int64   `json:"used_quota" gorm:"bigint;default:0"`
-	ModelMapping       *string `json:"model_mapping" gorm:"type:text"`
+	// ModelGroups optionally restricts each exposed model to a subset of the
+	// channel's groups. It is a JSON object such as {"gpt-4o":["default"],
+	// "claude-3":["vip"]}. Empty or missing values preserve the legacy
+	// model x group behaviour.
+	ModelGroups  *string `json:"model_groups" gorm:"type:text"`
+	UsedQuota    int64   `json:"used_quota" gorm:"bigint;default:0"`
+	ModelMapping *string `json:"model_mapping" gorm:"type:text"`
 	//MaxInputTokens     *int    `json:"max_input_tokens" gorm:"default:0"`
 	StatusCodeMapping *string `json:"status_code_mapping" gorm:"type:varchar(1024);default:''"`
 	Priority          *int64  `json:"priority" gorm:"bigint;default:0"`
@@ -383,6 +388,40 @@ func (channel *Channel) GetGroups() []string {
 	return groups
 }
 
+// GetModelGroups parses explicit bindings without discarding restrictions on
+// retired models or groups. Routing intersects them with the channel's current
+// models and groups, so removing a group never widens a model's access.
+func (channel *Channel) GetModelGroups() (map[string][]string, error) {
+	if channel.ModelGroups == nil || strings.TrimSpace(*channel.ModelGroups) == "" {
+		return nil, nil
+	}
+	var bindings map[string][]string
+	if err := common.UnmarshalJsonStr(*channel.ModelGroups, &bindings); err != nil || bindings == nil {
+		return nil, errors.New("model_groups must be a JSON object mapping model names to group arrays")
+	}
+	for modelName, groups := range bindings {
+		if modelName == "" || strings.TrimSpace(modelName) != modelName || len(modelName) > 255 {
+			return nil, errors.New("model_groups requires unpadded model names of 1 to 255 bytes")
+		}
+		if len(groups) == 0 {
+			return nil, fmt.Errorf("model_groups model %q must have at least one group", modelName)
+		}
+		seen := make(map[string]bool, len(groups))
+		for i, group := range groups {
+			group = strings.TrimSpace(group)
+			if group == "" || len(group) > 64 || strings.Contains(group, ",") {
+				return nil, fmt.Errorf("model_groups model %q contains an invalid group", modelName)
+			}
+			if seen[group] {
+				return nil, fmt.Errorf("model_groups model %q contains duplicate group %q", modelName, group)
+			}
+			seen[group] = true
+			groups[i] = group
+		}
+	}
+	return bindings, nil
+}
+
 func (channel *Channel) GetOtherInfo() map[string]any {
 	otherInfo := make(map[string]any)
 	if channel.OtherInfo != "" {
@@ -618,13 +657,12 @@ func (channel *Channel) GetStatusCodeMapping() string {
 }
 
 func (channel *Channel) Insert() error {
-	var err error
-	err = DB.Create(channel).Error
-	if err != nil {
-		return err
-	}
-	err = channel.AddAbilities(nil)
-	return err
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(channel).Error; err != nil {
+			return err
+		}
+		return channel.AddAbilities(tx)
+	})
 }
 
 func (channel *Channel) Update() error {
@@ -666,17 +704,24 @@ func (channel *Channel) Update() error {
 			}
 		}
 	}
-	var err error
-	err = DB.Model(channel).Updates(channel).Error
+	var saved Channel
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(channel).Updates(channel).Error; err != nil {
+			return err
+		}
+		if err := tx.First(&saved, "id = ?", channel.Id).Error; err != nil {
+			return err
+		}
+		return saved.UpdateAbilities(tx)
+	})
 	if err != nil {
 		return err
 	}
-	DB.Model(channel).First(channel, "id = ?", channel.Id)
+	*channel = saved
 	if channel.ChannelInfo.IsMultiKey {
 		SyncMultiKeyStatusesToRedis(channel)
 	}
-	err = channel.UpdateAbilities(nil)
-	return err
+	return nil
 }
 
 func (channel *Channel) UpdateResponseTime(responseTime int64) {
@@ -919,22 +964,17 @@ func DisableChannelByTag(tag string) error {
 
 func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string) error {
 	updateData := Channel{}
-	shouldReCreateAbilities := false
-	updatedTag := tag
 	// 如果 newTag 不为空且不等于 tag，则更新 tag
 	if newTag != nil && *newTag != tag {
 		updateData.Tag = newTag
-		updatedTag = *newTag
 	}
 	if modelMapping != nil {
 		updateData.ModelMapping = modelMapping
 	}
 	if models != nil && *models != "" {
-		shouldReCreateAbilities = true
 		updateData.Models = *models
 	}
 	if group != nil && *group != "" {
-		shouldReCreateAbilities = true
 		updateData.Group = *group
 	}
 	if priority != nil {
@@ -950,27 +990,24 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 		updateData.HeaderOverride = headerOverride
 	}
 
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error
-	if err != nil {
-		return err
-	}
-	if shouldReCreateAbilities {
-		channels, err := GetChannelsByTag(updatedTag, false, false)
-		if err == nil {
-			for _, channel := range channels {
-				err = channel.UpdateAbilities(nil)
-				if err != nil {
-					common.SysLog(fmt.Sprintf("failed to update abilities: channel_id=%d, tag=%s, error=%v", channel.Id, channel.GetTag(), err))
-				}
-			}
-		}
-	} else {
-		err := UpdateAbilityByTag(tag, newTag, priority, weight)
-		if err != nil {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var channels []*Channel
+		if err := lockForUpdate(tx).Where("tag = ?", tag).Find(&channels).Error; err != nil {
 			return err
 		}
-	}
-	return nil
+		for _, channel := range channels {
+			if err := tx.Model(channel).Updates(updateData).Error; err != nil {
+				return err
+			}
+			if err := tx.First(channel, "id = ?", channel.Id).Error; err != nil {
+				return err
+			}
+			if err := channel.UpdateAbilities(tx); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func UpdateChannelUsedQuota(id int, quota int) {

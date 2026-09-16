@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -17,7 +18,9 @@ import (
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -497,4 +500,141 @@ func TestApplyChannelPinLocksOnlySameChannelRetry(t *testing.T) {
 	tokenInfo := &relaycommon.RelayInfo{TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
 	require.Nil(t, relay.ApplyChannelPin(tokenOnly, tokenInfo))
 	assert.Nil(t, tokenInfo.LockedChannel)
+}
+
+func TestOriginTaskModelGroupBinding(t *testing.T) {
+	originalMemory := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = false
+	t.Cleanup(func() { common.MemoryCacheEnabled = originalMemory })
+	for _, path := range []string{"resolve_origin", "apply_pin"} {
+		for _, test := range []struct {
+			name     string
+			bindings string
+			group    string
+			allowed  bool
+		}{
+			{name: "allowed retired model", bindings: `{"retired-model":["vip"]}`, group: "vip", allowed: true},
+			{name: "restricted retired model", bindings: `{"retired-model":["vip"]}`, group: "default"},
+			{name: "invalid binding", bindings: `{"retired-model":`, group: "vip"},
+			{name: "legacy follow-up", group: "legacy-group", allowed: true},
+		} {
+			t.Run(path+"/"+test.name, func(t *testing.T) {
+				setupOriginTaskDB(t)
+				channel := insertOriginTaskChannel(t, common.ChannelStatusEnabled)
+				channel.Models, channel.Group = "another-model", "default,vip"
+				channel.ModelGroups = common.GetPointer(test.bindings)
+				require.NoError(t, model.DB.Save(channel).Error)
+				task := insertOriginOwnedTask(t, "retired-origin", 7, channel.Id, "origin-plugin")
+				task.Properties.OriginModelName = "retired-model"
+				require.NoError(t, model.DB.Save(task).Error)
+				c := originTaskTestContext(7)
+				common.SetContextKey(c, constant.ContextKeyUsingGroup, test.group)
+				info := &relaycommon.RelayInfo{
+					UserId:        7,
+					ChannelMeta:   &relaycommon.ChannelMeta{ChannelId: channel.Id},
+					TaskRelayInfo: &relaycommon.TaskRelayInfo{},
+				}
+				var taskErr *dto.TaskError
+				if path == "resolve_origin" {
+					info.OriginTaskID = task.TaskID
+					taskErr = relay.ResolveOriginTask(c, info)
+				} else {
+					info.OriginModelName = "retired-model"
+					service.GetChannelConstraints(c).AddPin(dto.ChannelPin{
+						ChannelId: channel.Id, Source: dto.PinSourceOriginTask, RetryMode: dto.PinRetrySameChannel,
+					})
+					taskErr = relay.ApplyChannelPin(c, info)
+				}
+				if !test.allowed {
+					require.NotNil(t, taskErr)
+					assert.Equal(t, http.StatusForbidden, taskErr.StatusCode)
+					assert.Equal(t, "origin_task_model_group_forbidden", taskErr.Code)
+					assert.Nil(t, info.LockedChannel)
+					return
+				}
+				require.Nil(t, taskErr)
+				locked, ok := info.LockedChannel.(*model.Channel)
+				require.True(t, ok)
+				assert.Equal(t, channel.Id, locked.Id)
+			})
+		}
+	}
+}
+
+func TestMidjourneyPaidFollowupRespectsOriginChannelModelGroups(t *testing.T) {
+	originalMemory, originalRedis := common.MemoryCacheEnabled, common.RedisEnabled
+	originalPrices := ratio_setting.ModelPrice2JSONString()
+	originalGroups := ratio_setting.GroupRatio2JSONString()
+	common.MemoryCacheEnabled, common.RedisEnabled = false, false
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"mj_upscale":0.01,"mj_variation":0.01}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"vip":0.5}`))
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled, common.RedisEnabled = originalMemory, originalRedis
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(originalPrices))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(originalGroups))
+	})
+	if service.GetHttpClient() == nil {
+		service.InitHttpClient()
+	}
+	for _, action := range []string{constant.MjActionUpscale, constant.MjActionVariation} {
+		for _, test := range []struct {
+			name     string
+			bindings string
+			group    string
+			allowed  bool
+		}{
+			{name: "bound group allowed", bindings: `{"mj_upscale":["vip"],"mj_variation":["vip"]}`, group: "vip", allowed: true},
+			{name: "other group denied", bindings: `{"mj_upscale":["vip"],"mj_variation":["vip"]}`, group: "default"},
+			{name: "malformed binding denied", bindings: `{"mj_upscale":`, group: "vip"},
+			{name: "legacy follow-up retained", group: "default", allowed: true},
+		} {
+			t.Run(action+"/"+test.name, func(t *testing.T) {
+				setupOriginTaskDB(t)
+				require.NoError(t, model.DB.AutoMigrate(&model.Midjourney{}, &model.User{}))
+				var upstreamCalls atomic.Int32
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					upstreamCalls.Add(1)
+					w.WriteHeader(http.StatusBadRequest)
+					_, err := w.Write([]byte(`{"code":4,"description":"fixture rejection","result":"fixture-result"}`))
+					assert.NoError(t, err)
+				}))
+				t.Cleanup(upstream.Close)
+				channel := model.Channel{
+					Name: "MJ origin", Type: constant.ChannelTypeMidjourney, Status: common.ChannelStatusEnabled,
+					Key: "fixture-key", BaseURL: &upstream.URL, Group: "default,vip", Models: "mj_imagine",
+					ModelGroups: common.GetPointer(test.bindings),
+				}
+				require.NoError(t, model.DB.Create(&channel).Error)
+				require.NoError(t, model.DB.Create(&model.Midjourney{UserId: 7, ChannelId: channel.Id, MjId: "origin", Status: "SUCCESS"}).Error)
+				require.NoError(t, model.DB.Create(&model.User{Id: 7, Username: "fixture-user", Quota: 1000000}).Error)
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				body := fmt.Sprintf(`{"taskId":"origin","action":%q,"index":1}`, action)
+				c.Request = httptest.NewRequest(http.MethodPost, "/mj/submit/change", strings.NewReader(body))
+				c.Request.Header.Set("Content-Type", "application/json")
+				common.SetContextKey(c, constant.ContextKeyUsingGroup, test.group)
+				common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeMidjourney)
+				common.SetContextKey(c, constant.ContextKeyChannelId, channel.Id+1)
+				info := &relaycommon.RelayInfo{
+					UserId: 7, UserGroup: "default", UsingGroup: test.group,
+					OriginModelName: service.CovertMjpActionToModelName(action), RelayMode: relayconstant.RelayModeMidjourneyChange,
+				}
+				response := relay.RelayMidjourneySubmit(c, info)
+				if test.allowed {
+					require.Nil(t, response)
+					assert.EqualValues(t, 1, upstreamCalls.Load())
+					assert.Equal(t, channel.Id, common.GetContextKeyInt(c, constant.ContextKeyChannelId))
+					assert.Equal(t, http.StatusBadRequest, recorder.Code)
+				} else {
+					require.NotNil(t, response)
+					assert.Equal(t, "origin_task_model_group_forbidden", response.Description)
+					assert.Zero(t, upstreamCalls.Load())
+					assert.Equal(t, channel.Id+1, common.GetContextKeyInt(c, constant.ContextKeyChannelId))
+				}
+				quota, err := model.GetUserQuota(7, true)
+				require.NoError(t, err)
+				assert.Equal(t, 1000000, quota, "denied or rejected requests must not charge the user")
+			})
+		}
+	}
 }

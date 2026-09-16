@@ -576,7 +576,9 @@ test('plugin loading failure can be retried while built-in providers remain sele
     return originalGet?.(url, config)
   })
   render(<ConfigurationHarness />)
-  expect(await screen.findByText('Failed to load plugins')).toBeVisible()
+  await waitFor(() =>
+    expect(screen.getByText('Failed to load plugins')).toBeVisible()
+  )
   expect(screen.getByRole('option', { name: /^OpenAI / })).toBeVisible()
   await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
   expect(await screen.findByRole('option', { name: /Video A/ })).toBeVisible()
@@ -1106,7 +1108,11 @@ test('editing opens the shared configuration and omits an unchanged key on updat
   expect(await screen.findByDisplayValue('Existing channel')).toBeVisible()
   expect(screen.queryByLabelText('Type *')).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Change provider' })).toBeVisible()
-  expect(screen.getAllByRole('tab')).toHaveLength(4)
+  expect(
+    within(
+      screen.getByRole('tablist', { name: 'Channel configuration' })
+    ).getAllByRole('tab')
+  ).toHaveLength(4)
   expect(
     screen.getByRole('tab', { name: /Connection & Models/ })
   ).toHaveAccessibleName(/Ready/)

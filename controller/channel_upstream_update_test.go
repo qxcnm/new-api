@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -358,6 +359,80 @@ func TestFailedAdvancedCustomDetectionDoesNotStageFullRemoval(t *testing.T) {
 	require.Empty(t, persistedSettings.UpstreamModelUpdateLastDetectedModels)
 	require.Empty(t, persistedSettings.UpstreamModelUpdateLastRemovedModels)
 	require.Equal(t, "gpt-4.1,o3", reloaded.Models)
+}
+
+func TestUpstreamModelUpdatesPreserveModelGroupsDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, err := w.Write([]byte(`{"data":[{"id":"bound-model"},{"id":"new-model"}]}`))
+				assert.NoError(t, err)
+			}))
+			t.Cleanup(server.Close)
+			bindings := `{"bound-model":["default"]}`
+			channel := model.Channel{
+				Name:        "Model sync group bindings",
+				Type:        constant.ChannelTypeOpenAI,
+				Key:         "fixture-key",
+				BaseURL:     &server.URL,
+				Models:      "bound-model",
+				Group:       "default,vip",
+				ModelGroups: &bindings,
+				Status:      common.ChannelStatusEnabled,
+			}
+			channel.SetOtherSettings(dto.ChannelOtherSettings{
+				UpstreamModelUpdateCheckEnabled:    true,
+				UpstreamModelUpdateAutoSyncEnabled: true,
+			})
+			require.NoError(t, db.Create(&channel).Error)
+			require.NoError(t, channel.AddAbilities(db))
+
+			// The background task uses a partial SELECT; bindings must survive it
+			// before rebuilding abilities for newly discovered models.
+			channels, err := findEnabledChannelsAfterID(0, 10)
+			require.NoError(t, err)
+			require.Len(t, channels, 1)
+			synced := channels[0]
+			settings := synced.GetOtherSettings()
+			changed, added, err := checkAndPersistChannelUpstreamModelUpdates(synced, &settings, true, true)
+			require.NoError(t, err)
+			assert.True(t, changed)
+			assert.Equal(t, 1, added)
+			var boundGroups, newGroups []string
+			require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ? AND model = ?", channel.Id, "bound-model").Pluck("group", &boundGroups).Error)
+			require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ? AND model = ?", channel.Id, "new-model").Pluck("group", &newGroups).Error)
+			assert.Equal(t, []string{"default"}, boundGroups)
+			assert.ElementsMatch(t, []string{"default", "vip"}, newGroups, "new models inherit channel groups")
+
+			settings.UpstreamModelUpdateLastRemovedModels = []string{"bound-model"}
+			synced.SetOtherSettings(settings)
+			_, removed, _, _, changed, err := applyChannelUpstreamModelUpdates(synced, nil, nil, []string{"bound-model"})
+			require.NoError(t, err)
+			assert.True(t, changed)
+			assert.Equal(t, []string{"bound-model"}, removed)
+			var count int64
+			require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ? AND model = ?", channel.Id, "bound-model").Count(&count).Error)
+			assert.Zero(t, count)
+			reloaded, err := model.GetChannelById(channel.Id, true)
+			require.NoError(t, err)
+			assert.Equal(t, channel.ModelGroups, reloaded.ModelGroups, "removal retains explicit bindings for future re-addition")
+
+			settings = reloaded.GetOtherSettings()
+			settings.UpstreamModelUpdateLastDetectedModels = []string{"bound-model"}
+			reloaded.SetOtherSettings(settings)
+			addedModels, _, _, _, changed, err := applyChannelUpstreamModelUpdates(reloaded, []string{"bound-model"}, nil, nil)
+			require.NoError(t, err)
+			assert.True(t, changed)
+			assert.Equal(t, []string{"bound-model"}, addedModels)
+			boundGroups = nil
+			require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ? AND model = ?", channel.Id, "bound-model").Pluck("group", &boundGroups).Error)
+			assert.Equal(t, []string{"default"}, boundGroups)
+		})
+	}
 }
 
 func TestFetchModelsUsesSharedChannelFetchBehavior(t *testing.T) {

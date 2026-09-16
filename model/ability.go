@@ -3,8 +3,8 @@ package model
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
@@ -164,8 +164,7 @@ func GetChannel(
 }
 
 // filterAbilitiesByConstraints applies the same ChannelSatisfiesFilters
-// predicate used by the memory-cache path. A failed channel lookup fails
-// closed when a task-plugin identity is required and fails open otherwise.
+// predicate used by the memory-cache path. A failed lookup fails closed.
 func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters []dto.ChannelFilter) []Ability {
 	if len(abilities) == 0 {
 		return nil
@@ -183,10 +182,7 @@ func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters
 
 	var channels []*Channel
 	if err := DB.Where("id IN ?", channelIds).Find(&channels).Error; err != nil {
-		if identityFilterRequiresKey(filters) {
-			return nil
-		}
-		return abilities
+		return nil
 	}
 
 	channelsByID := make(map[int]*Channel, len(channels))
@@ -197,57 +193,53 @@ func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters
 	filtered := make([]Ability, 0, len(abilities))
 	for _, ability := range abilities {
 		channel := channelsByID[ability.ChannelId]
-		if ok, _ := ChannelSatisfiesFilters(channel, modelName, filters); ok {
+		if ok, _ := ChannelSatisfiesFilters(channel, modelName, filters); ok && ChannelAllowsModelGroup(channel, ability.Group, modelName) {
 			filtered = append(filtered, ability)
 		}
 	}
 	return filtered
 }
 
-func identityFilterRequiresKey(filters []dto.ChannelFilter) bool {
-	for _, filter := range filters {
-		if filter.Kind == dto.FilterTaskPluginIdentity && filter.TaskPluginKey != "" {
-			return true
+// buildAbilities is shared by persisted routing and the memory cache.
+func (channel *Channel) buildAbilities() ([]Ability, error) {
+	bindings, err := channel.GetModelGroups()
+	if err != nil {
+		return nil, err
+	}
+	groups := channel.GetGroups()
+	seen := make(map[[2]string]bool)
+	abilities := make([]Ability, 0, len(channel.GetModels()))
+	for _, modelName := range channel.GetModels() {
+		modelGroups := groups
+		if explicit, ok := bindings[modelName]; ok {
+			modelGroups = explicit
+		}
+		for _, group := range modelGroups {
+			pair := [2]string{group, modelName}
+			if seen[pair] || !slices.Contains(groups, group) {
+				continue
+			}
+			seen[pair] = true
+			abilities = append(abilities, Ability{
+				Group: group, Model: modelName, ChannelId: channel.Id,
+				Enabled:  channel.Status == common.ChannelStatusEnabled,
+				Priority: channel.Priority, Weight: uint(channel.GetWeight()), Tag: channel.Tag,
+			})
 		}
 	}
-	return false
+	return abilities, nil
 }
 
 func (channel *Channel) AddAbilities(tx *gorm.DB) error {
-	models_ := strings.Split(channel.Models, ",")
-	groups_ := strings.Split(channel.Group, ",")
-	abilitySet := make(map[string]struct{})
-	abilities := make([]Ability, 0, len(models_))
-	for _, model := range models_ {
-		for _, group := range groups_ {
-			key := group + "|" + model
-			if _, exists := abilitySet[key]; exists {
-				continue
-			}
-			abilitySet[key] = struct{}{}
-			ability := Ability{
-				Group:     group,
-				Model:     model,
-				ChannelId: channel.Id,
-				Enabled:   channel.Status == common.ChannelStatusEnabled,
-				Priority:  channel.Priority,
-				Weight:    uint(channel.GetWeight()),
-				Tag:       channel.Tag,
-			}
-			abilities = append(abilities, ability)
-		}
+	abilities, err := channel.buildAbilities()
+	if err != nil {
+		return err
 	}
-	if len(abilities) == 0 {
-		return nil
-	}
-	// choose DB or provided tx
-	useDB := DB
-	if tx != nil {
-		useDB = tx
+	if tx == nil {
+		tx = DB
 	}
 	for _, chunk := range lo.Chunk(abilities, 50) {
-		err := useDB.Clauses(clause.OnConflict{DoNothing: true}).Create(&chunk).Error
-		if err != nil {
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&chunk).Error; err != nil {
 			return err
 		}
 	}
@@ -261,73 +253,13 @@ func (channel *Channel) DeleteAbilities() error {
 // UpdateAbilities updates abilities of this channel.
 // Make sure the channel is completed before calling this function.
 func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
-	isNewTx := false
-	// 如果没有传入事务，创建新的事务
 	if tx == nil {
-		tx = DB.Begin()
-		if tx.Error != nil {
-			return tx.Error
-		}
-		isNewTx = true
-		defer func() {
-			if r := recover(); r != nil {
-				tx.Rollback()
-			}
-		}()
+		return DB.Transaction(func(tx *gorm.DB) error { return channel.UpdateAbilities(tx) })
 	}
-
-	// First delete all abilities of this channel
-	err := tx.Where("channel_id = ?", channel.Id).Delete(&Ability{}).Error
-	if err != nil {
-		if isNewTx {
-			tx.Rollback()
-		}
+	if err := tx.Where("channel_id = ?", channel.Id).Delete(&Ability{}).Error; err != nil {
 		return err
 	}
-
-	// Then add new abilities
-	models_ := channel.GetModels()
-	groups_ := strings.Split(channel.Group, ",")
-	abilitySet := make(map[string]struct{})
-	abilities := make([]Ability, 0, len(models_))
-	for _, model := range models_ {
-		for _, group := range groups_ {
-			key := group + "|" + model
-			if _, exists := abilitySet[key]; exists {
-				continue
-			}
-			abilitySet[key] = struct{}{}
-			ability := Ability{
-				Group:     group,
-				Model:     model,
-				ChannelId: channel.Id,
-				Enabled:   channel.Status == common.ChannelStatusEnabled,
-				Priority:  channel.Priority,
-				Weight:    uint(channel.GetWeight()),
-				Tag:       channel.Tag,
-			}
-			abilities = append(abilities, ability)
-		}
-	}
-
-	if len(abilities) > 0 {
-		for _, chunk := range lo.Chunk(abilities, 50) {
-			err = tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&chunk).Error
-			if err != nil {
-				if isNewTx {
-					tx.Rollback()
-				}
-				return err
-			}
-		}
-	}
-
-	// 如果是新创建的事务，需要提交
-	if isNewTx {
-		return tx.Commit().Error
-	}
-
-	return nil
+	return channel.AddAbilities(tx)
 }
 
 func UpdateAbilityStatus(channelId int, status bool) error {

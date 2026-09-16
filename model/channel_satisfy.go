@@ -7,6 +7,28 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
+// ChannelAllowsModelGroup enforces an explicit per-model restriction even when
+// a pinned channel or a stale ability bypasses ordinary channel selection.
+// Models without an explicit binding keep the existing pin behavior, including
+// origin-task follow-ups whose model has since left the advertised model list.
+func ChannelAllowsModelGroup(channel *Channel, group, modelName string) bool {
+	if channel == nil {
+		return false
+	}
+	bindings, err := channel.GetModelGroups()
+	if err != nil {
+		return false
+	}
+	groups, bound := bindings[modelName]
+	if !bound && !slices.Contains(channel.GetModels(), modelName) {
+		groups, bound = bindings[ratio_setting.RoutingMatchModelName(modelName)]
+	}
+	if !bound {
+		return true
+	}
+	return slices.Contains(channel.GetGroups(), group) && slices.Contains(groups, group)
+}
+
 func IsChannelEnabledForGroupModel(group string, modelName string, channelID int) bool {
 	if group == "" || modelName == "" || channelID <= 0 {
 		return false
@@ -18,7 +40,8 @@ func IsChannelEnabledForGroupModel(group string, modelName string, channelID int
 	channelSyncLock.RLock()
 	defer channelSyncLock.RUnlock()
 
-	if group2model2channels == nil {
+	channel := channelsIDM[channelID]
+	if group2model2channels == nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !ChannelAllowsModelGroup(channel, group, modelName) {
 		return false
 	}
 
@@ -45,8 +68,12 @@ func IsChannelEnabledForAnyGroupModel(groups []string, modelName string, channel
 }
 
 func isChannelEnabledForGroupModelDB(group string, modelName string, channelID int) bool {
+	channel, err := GetChannelById(channelID, true)
+	if err != nil || channel.Status != common.ChannelStatusEnabled || !ChannelAllowsModelGroup(channel, group, modelName) {
+		return false
+	}
 	var count int64
-	err := DB.Model(&Ability{}).
+	err = DB.Model(&Ability{}).
 		Where(commonGroupCol+" = ? and model = ? and channel_id = ? and enabled = ?", group, modelName, channelID, true).
 		Count(&count).Error
 	if err == nil && count > 0 {

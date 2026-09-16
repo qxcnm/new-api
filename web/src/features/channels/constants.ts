@@ -447,6 +447,7 @@ export const FIELD_PLACEHOLDERS = {
   MODELS: 'Comma-separated model names, e.g., gpt-4,gpt-3.5-turbo',
   GROUP: 'Please Select user groups that can access this channel.',
   MODEL_MAPPING: '{"request_model": "actual_model"}',
+  MODEL_GROUPS: '{"gpt-4o":["default"],"claude-3":["vip"]}',
   TEST_MODEL: 'Model to use for testing',
   TAG: 'Optional tag for grouping channels',
   REMARK: 'Optional notes about this channel',
@@ -465,6 +466,8 @@ export const FIELD_DESCRIPTIONS = {
   GROUP: 'User groups that can access this channel. ',
   MODEL_MAPPING:
     'For this channel, map the model name in client requests to the model name sent upstream.',
+  MODEL_GROUPS:
+    'Bind each model on this channel to the groups that may use it. Models without an entry keep the legacy channel groups.',
   PRIORITY: 'Higher priority channels are selected first',
   WEIGHT: 'Used for load balancing. Higher weight = more requests',
   TEST_MODEL: 'Model to use when testing channel connectivity',
