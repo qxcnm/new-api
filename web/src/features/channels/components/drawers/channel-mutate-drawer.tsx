@@ -204,6 +204,7 @@ import { ParamOverrideEditorDialog } from '../dialogs/param-override-editor-dial
 import { StatusCodeRiskDialog } from '../dialogs/status-code-risk-dialog'
 import { ModelGroupsEditor } from '../model-groups-editor'
 import { ModelMappingEditor } from '../model-mapping-editor'
+import { ModelSchedulesEditor } from '../model-schedules-editor'
 import { UpstreamModelSelection } from '../upstream-model-selection'
 import {
   ChannelConfiguration,
@@ -3019,37 +3020,87 @@ export function ChannelMutateDrawer({
               )}
             />
           </div>
-
-          <div className='border-border/60 rounded-lg border p-4'>
-            <FormField
-              control={form.control}
-              name='model_groups'
-              render={({ field }) => (
-                <FormItem className='space-y-3'>
-                  <div className='space-y-1'>
-                    <FormLabel>{t('Model groups')}</FormLabel>
-                    <FormDescription>
-                      {t(FIELD_DESCRIPTIONS.MODEL_GROUPS)}
-                    </FormDescription>
-                  </div>
-                  <FormControl>
-                    <div>
-                      <ModelGroupsEditor
-                        value={field.value || ''}
-                        onChange={field.onChange}
-                        models={currentModelsArray}
-                        groups={currentGroups}
-                      />
-                    </div>
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-          </div>
         </div>
       </ChannelModelsSection>
     </div>
+  )
+
+  const modelPoliciesSection = (
+    <>
+      <div
+        role='group'
+        aria-label={t('Model schedules')}
+        className={channelConfigurationBlockClassName(
+          configuration.blocks.modelSchedules,
+          'min-w-0'
+        )}
+      >
+        <FormField
+          control={form.control}
+          name='model_schedules'
+          render={({ field }) => (
+            <FormItem className='space-y-3'>
+              <div className='flex items-center justify-between gap-3'>
+                <FormLabel>{t('Model schedules')}</FormLabel>
+                <ChannelConfigurationStatusIndicator
+                  status={configuration.blocks.modelSchedules}
+                />
+              </div>
+              <FormControl>
+                <div>
+                  <ModelSchedulesEditor
+                    value={field.value || ''}
+                    onChange={field.onChange}
+                    models={currentModelsArray}
+                    disabled={sensitiveLocked}
+                  />
+                </div>
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+      </div>
+      <div
+        role='group'
+        aria-label={t('Model groups')}
+        className={channelConfigurationBlockClassName(
+          configuration.blocks.modelGroups,
+          'min-w-0'
+        )}
+      >
+        <FormField
+          control={form.control}
+          name='model_groups'
+          render={({ field }) => (
+            <FormItem className='space-y-3'>
+              <div className='space-y-1'>
+                <div className='flex items-center justify-between gap-3'>
+                  <FormLabel>{t('Model groups')}</FormLabel>
+                  <ChannelConfigurationStatusIndicator
+                    status={configuration.blocks.modelGroups}
+                  />
+                </div>
+                <FormDescription>
+                  {t(FIELD_DESCRIPTIONS.MODEL_GROUPS)}
+                </FormDescription>
+              </div>
+              <FormControl>
+                <div>
+                  <ModelGroupsEditor
+                    value={field.value || ''}
+                    onChange={field.onChange}
+                    models={currentModelsArray}
+                    groups={currentGroups}
+                  />
+                </div>
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+      </div>
+    </>
   )
 
   const connectionSection = (
@@ -4149,6 +4200,7 @@ export function ChannelMutateDrawer({
           </>
         }
         models={modelsSection}
+        modelPolicies={modelPoliciesSection}
         routing={
           <>
             {modelMappingFields}

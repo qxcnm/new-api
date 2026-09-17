@@ -19,6 +19,13 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  // Per-model weekly availability validation.
+  'Model schedules must be a JSON object containing arrays of time windows',
+  'Model schedule keys must be non-empty model names without surrounding spaces',
+  'Each model supports at most 64 time windows',
+  'Select at least one weekday for each time window',
+  'End time must be after start time within the same day; split overnight windows into two',
+  'Time windows for the same model cannot overlap on the same weekday',
   // Per-model channel group bindings and form validation.
   'Bind each model on this channel to the groups that may use it. Models without an entry keep the legacy channel groups.',
   'Model groups must be a JSON object with string arrays',

@@ -2,14 +2,51 @@ package service
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestChannelModelScheduleAllowsOnlyExistingTaskReadsOutsideWindow(t *testing.T) {
+	closedDay := 1 << uint(time.Now().UTC().Add(8*time.Hour).AddDate(0, 0, 3).Weekday())
+	channel := &model.Channel{Id: 73}
+	channel.SetSetting(kitdto.ChannelSettings{ModelSchedules: map[string][]kitdto.ChannelModelScheduleWindow{
+		"scheduled": {{WeekdayMask: closedDay, StartMinute: 0, EndMinute: 1440}},
+	}})
+	for _, tc := range []struct {
+		name, method string
+		source       dto.ChannelPinSource
+		channelID    int
+		allowed      bool
+	}{
+		{"ordinary submit", http.MethodPost, "", 0, false},
+		{"token pin", http.MethodPost, dto.PinSourceToken, 73, false},
+		{"realtime GET", http.MethodGet, dto.PinSourceToken, 73, false},
+		{"new remix", http.MethodPost, dto.PinSourceOriginTask, 73, false},
+		{"read original task", http.MethodGet, dto.PinSourceOriginTask, 73, true},
+		{"read result headers", http.MethodHead, dto.PinSourceOriginTask, 73, true},
+		{"another channel", http.MethodGet, dto.PinSourceOriginTask, 74, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(tc.method, "/v1/videos/task", nil)
+			if tc.source != "" {
+				GetChannelConstraints(c).AddPin(dto.ChannelPin{ChannelId: tc.channelID, Source: tc.source})
+			}
+			assert.Equal(t, tc.allowed, ApplyChannelModelGroup(c, channel, "scheduled"))
+		})
+	}
+}
 
 func TestPinnedTaskPluginChannelTypesUsesPinnedGenerationIndex(t *testing.T) {
 	registry := jsplugin.NewRegistry()

@@ -629,7 +629,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		return types.NewError(errors.New("channel is nil"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 	if !service.ApplyChannelModelGroup(c, channel, modelName) {
-		return types.NewError(errors.New("selected channel does not allow this model in the requested group"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithStatusCode(http.StatusForbidden), types.ErrOptionWithSkipRetry())
+		return types.NewError(errors.New("selected channel does not allow this model in the requested group or time window"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithStatusCode(http.StatusForbidden), types.ErrOptionWithSkipRetry())
 	}
 	if expectedPlugin != "" && !channelMatchesExpectedTaskPlugin(c, channel, expectedPlugin) {
 		logTaskPluginChannelDecision(c, channel, modelName, "channel_rejected", "identity_mismatch")

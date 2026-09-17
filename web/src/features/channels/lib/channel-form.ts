@@ -38,6 +38,7 @@ import {
   validateAdvancedCustomConfig,
 } from './advanced-custom'
 import { validateModelGroups } from './model-groups'
+import { parseModelSchedules, validateModelSchedules } from './model-schedules'
 
 // ============================================================================
 // Form Validation Schema
@@ -216,6 +217,7 @@ export const channelFormSchema = z
         'Model mapping must be a JSON object with string values'
       ),
     model_groups: z.string().optional(),
+    model_schedules: z.string().optional(),
     priority: z.number().optional(),
     weight: z.number().optional(),
     test_model: z.string().optional(),
@@ -288,6 +290,8 @@ export const channelFormSchema = z
     upstream_model_update_ignored_models: z.string().optional(),
   })
   .superRefine((data, ctx) => {
+    const schedulesError = validateModelSchedules(data.model_schedules)
+    if (schedulesError) addRequiredIssue(ctx, 'model_schedules', schedulesError)
     const modelGroupsError = validateModelGroups(
       data.model_groups,
       data.models
@@ -435,6 +439,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   group: ['default'],
   model_mapping: '',
   model_groups: '',
+  model_schedules: '',
   priority: 0,
   weight: 0,
   test_model: '',
@@ -493,6 +498,7 @@ export function transformChannelToFormDefaults(
 ): ChannelFormValues {
   // Parse channel extra settings from setting field
   let extraSettings = {
+    model_schedules: '',
     task_plugin_key: '',
     force_format: false,
     thinking_to_content: false,
@@ -512,6 +518,10 @@ export function transformChannelToFormDefaults(
         parsed.http2_connection_shards
       )
       extraSettings = {
+        model_schedules:
+          parsed.model_schedules === undefined
+            ? ''
+            : JSON.stringify(parsed.model_schedules, null, 2),
         task_plugin_key: parsed.task_plugin_key || '',
         force_format: parsed.force_format || false,
         thinking_to_content: parsed.thinking_to_content || false,
@@ -632,7 +642,9 @@ export function transformChannelToFormDefaults(
  * Build the setting JSON string from form extra settings
  */
 export function buildSettingJSON(formData: ChannelFormValues): string {
+  const existingSetting = parseOptionalJson(formData.setting)
   const settingObj: Record<string, unknown> = {
+    ...(isJsonObjectValue(existingSetting) ? existingSetting : {}),
     task_plugin_key:
       formData.type === CHANNEL_TYPE_TASK_PLUGIN
         ? formData.task_plugin_key?.trim() || ''
@@ -644,6 +656,12 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     system_prompt: formData.system_prompt || '',
     system_prompt_override: formData.system_prompt_override || false,
   }
+  const modelSchedules = parseModelSchedules(formData.model_schedules)
+  if (modelSchedules && Object.keys(modelSchedules).length > 0) {
+    settingObj.model_schedules = modelSchedules
+  } else {
+    delete settingObj.model_schedules
+  }
 
   const protocol = normalizeHttpProtocol(formData.http_protocol)
   const shards =
@@ -652,6 +670,8 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
       : normalizeHttp2ConnectionShards(formData.http2_connection_shards)
 
   // Omit defaults so unchanged channels keep equivalent JSON.
+  delete settingObj.http_protocol
+  delete settingObj.http2_connection_shards
   if (protocol === HTTP_PROTOCOL_HTTP1) {
     settingObj.http_protocol = HTTP_PROTOCOL_HTTP1
   } else if (shards > 1) {

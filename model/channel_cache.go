@@ -127,13 +127,14 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
-// filterModelGroupCandidates applies bindings to the requested model before
+// filterModelGroupCandidates applies bindings and schedules before
 // selection, including when candidate IDs came from a normalized model name.
 // The caller holds channelSyncLock.
 func filterModelGroupCandidates(ids []int, group, modelName string) []int {
 	allowed := make([]int, 0, len(ids))
+	now := time.Now()
 	for _, id := range ids {
-		if ChannelAllowsModelGroup(channelsIDM[id], group, modelName) {
+		if ChannelAllowsModelGroup(channelsIDM[id], group, modelName) && ChannelModelAvailableAt(channelsIDM[id], modelName, now) {
 			allowed = append(allowed, id)
 		}
 	}

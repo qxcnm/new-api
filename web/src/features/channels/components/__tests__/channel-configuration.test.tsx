@@ -539,9 +539,166 @@ test('configuration navigation retains its height when the form content overflow
   const navigation = screen.getByRole('tablist', {
     name: 'Channel configuration',
   })
-  expect(navigation.parentElement).toHaveClass('shrink-0')
+  expect(navigation.parentElement).toHaveClass('shrink-0', 'overflow-x-auto')
+  expect(
+    within(navigation)
+      .getAllByRole('tab')
+      .map((tab) => tab.textContent)
+  ).toEqual([
+    'Connection & Models',
+    'Model policies',
+    'Routing & Mapping',
+    'Request & Response',
+    'Other Settings',
+  ])
   expect(screen.getByRole('dialog')).toHaveClass('sm:max-w-7xl')
 })
+
+test('model policies keep both drafts in their own scrollable tab until the channel is saved', async () => {
+  editingChannel.group = 'default,premium'
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+
+  expect(screen.queryByText('Model schedules')).not.toBeInTheDocument()
+  expect(screen.queryByText('Model groups')).not.toBeInTheDocument()
+  const policiesTab = screen.getByRole('tab', { name: 'Model policies' })
+  policiesTab.focus()
+  await user.keyboard('{Enter}')
+  expect(policiesTab).toHaveAttribute('aria-selected', 'true')
+  const panel = screen.getByRole('tabpanel', { name: 'Model policies' })
+  expect(panel).toHaveClass('min-w-0', 'overflow-y-auto', 'space-y-5')
+
+  const schedules = within(panel).getByRole('group', {
+    name: 'Model schedules',
+  })
+  const groups = within(panel).getByRole('group', { name: 'Model groups' })
+  const schedule = {
+    'custom-model': [{ weekday_mask: 62, start_minute: 540, end_minute: 1080 }],
+  }
+  const bindings = { 'custom-model': ['default'] }
+  await user.click(within(schedules).getByRole('tab', { name: 'JSON' }))
+  fireEvent.input(
+    within(schedules).getByRole('textbox', { name: 'Model schedules' }),
+    {
+      target: { value: JSON.stringify(schedule) },
+    }
+  )
+  await user.click(within(groups).getByRole('tab', { name: 'JSON' }))
+  fireEvent.input(
+    within(groups).getByRole('textbox', { name: 'Model groups' }),
+    {
+      target: { value: JSON.stringify(bindings) },
+    }
+  )
+  expect(policiesTab).toHaveAccessibleName(/Configured/)
+  expect(
+    within(schedules).getByRole('img', { name: 'Configured' })
+  ).toBeVisible()
+  expect(within(groups).getByRole('img', { name: 'Configured' })).toBeVisible()
+
+  await user.click(screen.getByRole('tab', { name: /Connection & Models/ }))
+  expect(panel).not.toBeVisible()
+  expect(screen.getByRole('group', { name: 'Models' })).toBeVisible()
+  await user.click(policiesTab)
+  expect(
+    within(schedules).getByRole('textbox', { name: 'Model schedules' })
+  ).toHaveValue(JSON.stringify(schedule))
+  expect(
+    within(groups).getByRole('textbox', { name: 'Model groups' })
+  ).toHaveValue(JSON.stringify(bindings))
+  expect(put).not.toHaveBeenCalled()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as {
+    setting: string
+    model_groups: string
+  }
+  expect(JSON.parse(payload.setting).model_schedules).toEqual(schedule)
+  expect(JSON.parse(payload.model_groups)).toEqual(bindings)
+})
+
+test('saving without visiting model policies preserves both saved settings', async () => {
+  const schedule = {
+    'custom-model': [{ weekday_mask: 62, start_minute: 540, end_minute: 1080 }],
+  }
+  const bindings = { 'custom-model': ['default'] }
+  editingChannel.setting = JSON.stringify({ model_schedules: schedule })
+  editingChannel.model_groups = JSON.stringify(bindings)
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  expect(
+    screen.getByRole('tab', { name: /Model policies/ })
+  ).toHaveAccessibleName(/Configured/)
+  expect(
+    screen.queryByRole('group', { name: 'Model schedules' })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as {
+    setting: string
+    model_groups: string
+  }
+  expect(JSON.parse(payload.setting).model_schedules).toEqual(schedule)
+  expect(JSON.parse(payload.model_groups)).toEqual(bindings)
+})
+
+test.each([
+  {
+    label: 'Model schedules',
+    reset: 'Enable all models all day',
+    channel: {
+      setting:
+        '{"model_schedules":{"custom-model":[{"weekday_mask":62,"start_minute":1080,"end_minute":540}]}}',
+    },
+  },
+  {
+    label: 'Model groups',
+    reset: 'Use channel groups for all models',
+    channel: { model_groups: '{broken' },
+  },
+])(
+  'invalid saved $label opens the unvisited model policies tab and clears its error when reset',
+  async ({ label, reset, channel }) => {
+    editingChannel = { ...editingChannel, ...channel }
+    const put = vi.spyOn(api, 'put')
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    const policiesTab = screen.getByRole('tab', { name: /Model policies/ })
+    expect(screen.queryByRole('group', { name: label })).not.toBeInTheDocument()
+    const connectionTab = screen.getByRole('tab', {
+      name: /Connection & Models/,
+    })
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+    await waitFor(() =>
+      expect(policiesTab).toHaveAttribute('aria-selected', 'true')
+    )
+    const block = screen.getByRole('group', { name: label })
+    expect(policiesTab).toHaveAccessibleName(/Error/)
+    expect(connectionTab).toHaveAccessibleName(/Ready/)
+    expect(within(block).getByRole('img', { name: 'Error' })).toBeVisible()
+    expect(block).toHaveClass('border-destructive/50')
+    await waitFor(() =>
+      expect(block).toContainElement(document.activeElement as HTMLElement)
+    )
+    expect(put).not.toHaveBeenCalled()
+
+    await user.click(within(block).getByRole('button', { name: reset }))
+    await waitFor(() =>
+      expect(policiesTab).not.toHaveAccessibleName(/Error|Configured/)
+    )
+    expect(block).not.toHaveClass('border-destructive/50')
+  }
+)
 
 test('without plugin binding permission only built-in providers are offered', () => {
   useAuthStore.setState({
@@ -1050,7 +1207,7 @@ test('model discovery discards a response for old credentials and retains manual
   expect(
     screen.getByRole('button', { name: 'current-upstream-model' })
   ).toBeVisible()
-  expect(screen.getByText('custom-model')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'custom-model' })).toBeVisible()
 })
 
 test('model discovery reports failures inline and allows an empty result to fall back to manual models', async () => {
@@ -1112,7 +1269,7 @@ test('editing opens the shared configuration and omits an unchanged key on updat
     within(
       screen.getByRole('tablist', { name: 'Channel configuration' })
     ).getAllByRole('tab')
-  ).toHaveLength(4)
+  ).toHaveLength(5)
   expect(
     screen.getByRole('tab', { name: /Connection & Models/ })
   ).toHaveAccessibleName(/Ready/)
@@ -1157,7 +1314,7 @@ test('editing legacy channels retains the full provider list and saves the origi
   const legacy = screen.getByRole('option', { name: 'Sora Built-in #55' })
   expect(legacy).toHaveAttribute('aria-current', 'true')
   await user.click(legacy)
-  expect(screen.getByText('custom-model')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'custom-model' })).toBeVisible()
   expect(screen.getByDisplayValue('https://saved.example')).toBeVisible()
   fireEvent.change(screen.getByLabelText('Name *'), {
     target: { value: 'Renamed legacy channel' },
@@ -1189,25 +1346,25 @@ test('opening and reselecting an existing plugin preserves its saved configurati
   render(<ConfigurationHarness currentRow={editingChannel} />)
   expect(await screen.findByDisplayValue('Existing channel')).toBeVisible()
   expect(screen.getByDisplayValue('https://saved.example')).toBeVisible()
-  expect(screen.getByText('custom-model')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'custom-model' })).toBeVisible()
   expect(screen.queryByLabelText('Task plugin *')).not.toBeInTheDocument()
   const providerControl = screen.getByRole('button', {
     name: 'Change provider',
   })
   await user.click(await within(providerControl).findByText('Video A'))
   await user.click(await screen.findByRole('option', { name: /Video A/ }))
-  expect(screen.getByText('custom-model')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'custom-model' })).toBeVisible()
   expect(screen.getByDisplayValue('https://saved.example')).toBeVisible()
   await user.click(screen.getByRole('button', { name: 'Change provider' }))
   await user.click(
     screen.getByRole('button', { name: 'Back to configuration' })
   )
-  expect(screen.getByText('custom-model')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'custom-model' })).toBeVisible()
   await user.click(screen.getByRole('button', { name: 'Change provider' }))
   await user.click(screen.getByRole('option', { name: /^Video B Plugin/ }))
   expect(screen.getByDisplayValue('Existing channel')).toBeVisible()
   expect(screen.getByDisplayValue('https://saved.example')).toBeVisible()
-  expect(screen.getByText('video-b-1')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'video-b-1' })).toBeVisible()
   await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
   expect(screen.getByLabelText('Priority')).toHaveValue(7)
 })

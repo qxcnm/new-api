@@ -31,6 +31,7 @@ export type ChannelProviderTarget =
 
 export type ChannelConfigurationSection =
   | 'connection'
+  | 'modelPolicies'
   | 'routing'
   | 'request'
   | 'other'
@@ -42,6 +43,8 @@ export type ChannelConfigurationStatus =
   | 'error'
 
 const CONFIGURATION_BLOCKS = {
+  modelSchedules: { section: 'modelPolicies', fields: ['model_schedules'] },
+  modelGroups: { section: 'modelPolicies', fields: ['model_groups'] },
   modelMapping: { section: 'routing', fields: ['model_mapping'] },
   routingStrategy: {
     section: 'routing',
@@ -133,6 +136,8 @@ export function getChannelConfigurationState(
   const openaiPassthrough = OPENAI_FIELD_PASSTHROUGH_TYPES.has(values.type)
   const claudePassthrough = CLAUDE_FIELD_PASSTHROUGH_TYPES.has(values.type)
   const configured: Record<ChannelConfigurationBlock, boolean> = {
+    modelSchedules: hasConfiguredJson(values.model_schedules),
+    modelGroups: hasConfiguredJson(values.model_groups),
     modelMapping: hasConfiguredJson(values.model_mapping),
     routingStrategy: Boolean(
       values.priority ||
@@ -186,6 +191,7 @@ export function getChannelConfigurationState(
     ChannelConfigurationStatus
   > = {
     connection: 'idle',
+    modelPolicies: 'idle',
     routing: 'idle',
     request: 'idle',
     other: 'idle',

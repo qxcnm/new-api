@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -59,6 +60,35 @@ func setupModelListControllerTestDB(t *testing.T) *gorm.DB {
 	})
 
 	return db
+}
+
+func createModelListAbilities(t *testing.T, db *gorm.DB, abilities []model.Ability) {
+	t.Helper()
+
+	channels := make(map[int]*model.Channel)
+	for _, ability := range abilities {
+		channel, exists := channels[ability.ChannelId]
+		if !exists {
+			channel = &model.Channel{
+				Id:     ability.ChannelId,
+				Name:   fmt.Sprintf("model-list-channel-%d", ability.ChannelId),
+				Type:   constant.ChannelTypeOpenAI,
+				Key:    "model-list-fixture-key",
+				Status: common.ChannelStatusEnabled,
+			}
+			channels[ability.ChannelId] = channel
+		}
+		if !slices.Contains(channel.GetGroups(), ability.Group) {
+			channel.Group = strings.TrimPrefix(channel.Group+","+ability.Group, ",")
+		}
+		if !slices.Contains(channel.GetModels(), ability.Model) {
+			channel.Models = strings.TrimPrefix(channel.Models+","+ability.Model, ",")
+		}
+	}
+	for _, channel := range channels {
+		require.NoError(t, db.Create(channel).Error)
+	}
+	require.NoError(t, db.Create(&abilities).Error)
 }
 
 func initModelListColumnNames(t *testing.T) {
@@ -190,10 +220,10 @@ func TestGetUserModelsFiltersByRequestedGroup(t *testing.T) {
 		Group:    "default",
 		Status:   common.UserStatusEnabled,
 	}).Error)
-	require.NoError(t, db.Create(&[]model.Ability{
+	createModelListAbilities(t, db, []model.Ability{
 		{Group: "default", Model: "zz-default-only-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-disabled-model", ChannelId: 1, Enabled: false},
-	}).Error)
+	})
 
 	defaultRecorder := httptest.NewRecorder()
 	defaultContext, _ := gin.CreateTestContext(defaultRecorder)
@@ -244,13 +274,13 @@ func TestGetUserModelsExpandsAutoGroupsInConfiguredOrder(t *testing.T) {
 		Group:    "default",
 		Status:   common.UserStatusEnabled,
 	}).Error)
-	require.NoError(t, db.Create(&[]model.Ability{
+	createModelListAbilities(t, db, []model.Ability{
 		{Group: "vip", Model: "zz-vip-model", ChannelId: 1, Enabled: true},
 		{Group: "vip", Model: "zz-shared-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-default-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-shared-model", ChannelId: 2, Enabled: true},
 		{Group: "unavailable", Model: "zz-unavailable-model", ChannelId: 1, Enabled: true},
-	}).Error)
+	})
 
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
@@ -284,12 +314,12 @@ func TestListModelsIncludesTieredBillingModel(t *testing.T) {
 		Group:    "default",
 		Status:   common.UserStatusEnabled,
 	}).Error)
-	require.NoError(t, db.Create(&[]model.Ability{
+	createModelListAbilities(t, db, []model.Ability{
 		{Group: "default", Model: "zz-tiered-visible-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-tiered-empty-expr-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-tiered-missing-expr-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-unpriced-model", ChannelId: 1, Enabled: true},
-	}).Error)
+	})
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -403,12 +433,12 @@ func TestListModelsTokenLimitIncludesTieredBillingModel(t *testing.T) {
 		"zz-token-tiered-empty-expr-model": "",
 	})
 	db := setupModelListControllerTestDB(t)
-	require.NoError(t, db.Create(&[]model.Ability{
+	createModelListAbilities(t, db, []model.Ability{
 		{Group: "default", Model: "zz-token-tiered-visible-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-token-tiered-empty-expr-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-token-tiered-missing-expr-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-token-unpriced-model", ChannelId: 1, Enabled: true},
-	}).Error)
+	})
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -446,11 +476,11 @@ func TestListModelsTokenLimitUsesResolvedCustomAutoGroups(t *testing.T) {
 	})
 
 	db := setupModelListControllerTestDB(t)
-	require.NoError(t, db.Create(&[]model.Ability{
+	createModelListAbilities(t, db, []model.Ability{
 		{Group: "vip", Model: "zz-vip-allowed", ChannelId: 1, Enabled: true},
 		{Group: "vip", Model: "zz-vip-denied", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-default-outside-snapshot", ChannelId: 1, Enabled: true},
-	}).Error)
+	})
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)

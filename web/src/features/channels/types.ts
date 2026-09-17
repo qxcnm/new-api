@@ -18,6 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { z } from 'zod'
 
+import type { ModelSchedules } from './lib/model-schedules'
+
 // ============================================================================
 // Channel Schema & Types
 // ============================================================================
@@ -81,6 +83,7 @@ export type Channel = z.infer<typeof channelSchema>
 // ============================================================================
 
 export interface ChannelSettings {
+  model_schedules?: ModelSchedules
   task_plugin_key?: string
   force_format?: boolean
   thinking_to_content?: boolean

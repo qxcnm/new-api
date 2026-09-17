@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -42,8 +43,17 @@ func GetAllEnableAbilityWithChannels() ([]AbilityWithChannel, error) {
 
 func GetGroupEnabledModels(group string) []string {
 	var models []string
-	// Find distinct models
-	DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true).Distinct("model").Pluck("model", &models)
+	var abilities []Ability
+	if err := DB.Where(commonGroupCol+" = ? and enabled = ?", group, true).Find(&abilities).Error; err != nil {
+		return models
+	}
+	seen := make(map[string]bool)
+	for _, ability := range filterAbilitiesByConstraints(abilities, "", nil) {
+		if !seen[ability.Model] {
+			seen[ability.Model] = true
+			models = append(models, ability.Model)
+		}
+	}
 	return models
 }
 
@@ -191,9 +201,14 @@ func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters
 	}
 
 	filtered := make([]Ability, 0, len(abilities))
+	now := time.Now()
 	for _, ability := range abilities {
 		channel := channelsByID[ability.ChannelId]
-		if ok, _ := ChannelSatisfiesFilters(channel, modelName, filters); ok && ChannelAllowsModelGroup(channel, ability.Group, modelName) {
+		requestedModel := modelName
+		if requestedModel == "" {
+			requestedModel = ability.Model
+		}
+		if ok, _ := ChannelSatisfiesFilters(channel, requestedModel, filters); ok && ChannelAllowsModelGroup(channel, ability.Group, requestedModel) && ChannelModelAvailableAt(channel, requestedModel, now) {
 			filtered = append(filtered, ability)
 		}
 	}

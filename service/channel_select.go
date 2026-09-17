@@ -2,6 +2,8 @@ package service
 
 import (
 	"errors"
+	"net/http"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -24,9 +26,28 @@ func GetChannelConstraints(c *gin.Context) *dto.ChannelConstraints {
 	return constraints
 }
 
-// ApplyChannelModelGroup checks explicit model bindings and resolves the billing
+// ChannelModelScheduleAllowsRequest keeps existing task results accessible after
+// a window closes. Realtime GETs and new task submissions still obey schedules.
+func ChannelModelScheduleAllowsRequest(c *gin.Context, channel *model.Channel, modelName string) bool {
+	if channel == nil {
+		return false
+	}
+	if c != nil && c.Request != nil && (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) {
+		for _, pin := range GetChannelConstraints(c).Pins {
+			if pin.Source == dto.PinSourceOriginTask && pin.ChannelId == channel.Id {
+				return true
+			}
+		}
+	}
+	return model.ChannelModelAvailableAt(channel, modelName, time.Now())
+}
+
+// ApplyChannelModelGroup checks model schedules/bindings and resolves the billing
 // group for an auto-group pin. An already selected group stays fixed on retry.
 func ApplyChannelModelGroup(c *gin.Context, channel *model.Channel, modelName string) bool {
+	if !ChannelModelScheduleAllowsRequest(c, channel, modelName) {
+		return false
+	}
 	group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 	if group != "auto" {
 		return model.ChannelAllowsModelGroup(channel, group, modelName)

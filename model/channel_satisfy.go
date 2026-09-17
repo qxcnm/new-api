@@ -2,6 +2,7 @@ package model
 
 import (
 	"slices"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -41,7 +42,7 @@ func IsChannelEnabledForGroupModel(group string, modelName string, channelID int
 	defer channelSyncLock.RUnlock()
 
 	channel := channelsIDM[channelID]
-	if group2model2channels == nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !ChannelAllowsModelGroup(channel, group, modelName) {
+	if group2model2channels == nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !ChannelAllowsModelGroup(channel, group, modelName) || !ChannelModelAvailableAt(channel, modelName, time.Now()) {
 		return false
 	}
 
@@ -69,7 +70,7 @@ func IsChannelEnabledForAnyGroupModel(groups []string, modelName string, channel
 
 func isChannelEnabledForGroupModelDB(group string, modelName string, channelID int) bool {
 	channel, err := GetChannelById(channelID, true)
-	if err != nil || channel.Status != common.ChannelStatusEnabled || !ChannelAllowsModelGroup(channel, group, modelName) {
+	if err != nil || channel.Status != common.ChannelStatusEnabled || !ChannelAllowsModelGroup(channel, group, modelName) || !ChannelModelAvailableAt(channel, modelName, time.Now()) {
 		return false
 	}
 	var count int64

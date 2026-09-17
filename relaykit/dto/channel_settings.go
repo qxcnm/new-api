@@ -24,6 +24,15 @@ type ChannelSettings struct {
 	// HTTP2ConnectionShards spreads HTTP/2 traffic across N independent transports
 	// (1-8). Zero/unset means 1. Ignored when HTTPProtocol is "http1".
 	HTTP2ConnectionShards int `json:"http2_connection_shards,omitempty"`
+	// ModelSchedules limits channel model availability to weekly UTC+8 windows.
+	// An absent model or an empty list means no time restriction.
+	ModelSchedules map[string][]ChannelModelScheduleWindow `json:"model_schedules,omitempty"`
+}
+
+type ChannelModelScheduleWindow struct {
+	WeekdayMask int `json:"weekday_mask"` // Sunday is bit 0, Saturday is bit 6.
+	StartMinute int `json:"start_minute"` // Inclusive, 0 through 1439.
+	EndMinute   int `json:"end_minute"`   // Exclusive, 1 through 1440.
 }
 
 const (
