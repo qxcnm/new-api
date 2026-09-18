@@ -343,6 +343,18 @@ func TestResolveChannelTestUserIDUsesRequestUser(t *testing.T) {
 	require.Equal(t, 2, userID)
 }
 
+func TestResolveChannelTestGroupUsesBoundModelGroup(t *testing.T) {
+	bindings := `{"glm-5.3-flash":["glm5.3 5.3flash"]}`
+	channel := &model.Channel{
+		Models:      "glm-5.3-flash",
+		Group:       "glm-5.2,glm5.3 5.3flash",
+		ModelGroups: &bindings,
+	}
+
+	require.Equal(t, "glm5.3 5.3flash", resolveChannelTestGroup(channel, "glm-5.3-flash", "default"))
+	require.Equal(t, "default", resolveChannelTestGroup(channel, "unbound-model", "default"))
+}
+
 func TestSelectChannelsForAutomaticTestPassiveRecoveryOnlyUsesAutoDisabled(t *testing.T) {
 	channels := []*model.Channel{
 		{Id: 1, Status: common.ChannelStatusEnabled},

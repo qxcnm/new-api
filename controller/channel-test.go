@@ -52,6 +52,22 @@ func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) s
 	return normalized
 }
 
+// resolveChannelTestGroup keeps channel tests usable for explicitly bound
+// models even when the test user belongs to a different group. The test is an
+// administrative upstream connectivity check; ordinary requests still use the
+// caller's selected group and remain subject to the binding.
+func resolveChannelTestGroup(channel *model.Channel, modelName, userGroup string) string {
+	if model.ChannelAllowsModelGroup(channel, userGroup, modelName) {
+		return userGroup
+	}
+	for _, group := range channel.GetGroups() {
+		if model.ChannelAllowsModelGroup(channel, group, modelName) {
+			return group
+		}
+	}
+	return userGroup
+}
+
 func resolveChannelTestUserID(c *gin.Context) (int, error) {
 	if c != nil {
 		if userID := c.GetInt("id"); userID > 0 {
@@ -166,7 +182,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	c.Set("channel", channel.Type)
 	c.Set("base_url", channel.GetBaseURL())
 	group, _ := model.GetUserGroup(testUserID, false)
-	c.Set("group", group)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, resolveChannelTestGroup(channel, testModel, group))
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, testModel)
 	if newAPIError != nil {
