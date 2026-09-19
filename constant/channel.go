@@ -1,5 +1,7 @@
 package constant
 
+import "strings"
+
 const (
 	ChannelTypeUnknown        = 0
 	ChannelTypeOpenAI         = 1
@@ -206,25 +208,76 @@ func GetChannelTypeName(channelType int) string {
 }
 
 type ChannelSpecialBase struct {
-	ClaudeBaseURL string
-	OpenAIBaseURL string
+	ClaudeBaseURL    string
+	OpenAIBaseURL    string
+	ResponsesBaseURL string
 }
 
 var ChannelSpecialBases = map[string]ChannelSpecialBase{
 	"glm-coding-plan": {
-		ClaudeBaseURL: "https://open.bigmodel.cn/api/anthropic",
-		OpenAIBaseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
+		ClaudeBaseURL:    "https://open.bigmodel.cn/api/anthropic",
+		OpenAIBaseURL:    "https://open.bigmodel.cn/api/coding/paas/v4",
+		ResponsesBaseURL: "https://open.bigmodel.cn/api/v1",
 	},
 	"glm-coding-plan-international": {
-		ClaudeBaseURL: "https://api.z.ai/api/anthropic",
-		OpenAIBaseURL: "https://api.z.ai/api/coding/paas/v4",
+		ClaudeBaseURL:    "https://api.z.ai/api/anthropic",
+		OpenAIBaseURL:    "https://api.z.ai/api/coding/paas/v4",
+		ResponsesBaseURL: "https://api.z.ai/api/v1",
 	},
 	"kimi-coding-plan": {
 		ClaudeBaseURL: "https://api.kimi.com/coding",
 		OpenAIBaseURL: "https://api.kimi.com/coding/v1",
 	},
+	"minimax-coding-plan": {
+		ClaudeBaseURL: "https://api.minimaxi.com/anthropic",
+	},
+	"minimax-coding-plan-international": {
+		ClaudeBaseURL: "https://api.minimax.io/anthropic",
+	},
 	"doubao-coding-plan": {
 		ClaudeBaseURL: "https://ark.cn-beijing.volces.com/api/coding",
 		OpenAIBaseURL: "https://ark.cn-beijing.volces.com/api/coding/v3",
 	},
+}
+
+// PlanChannelTypes is the server-side allowlist used when deriving plan
+// identity. A client may submit a pseudo base URL, but it cannot turn an
+// arbitrary channel type into a plan channel.
+var PlanChannelTypes = map[string]map[int]struct{}{
+	"glm-coding-plan": {
+		ChannelTypeZhipu_v4: {},
+	},
+	"glm-coding-plan-international": {
+		ChannelTypeZhipu_v4: {},
+	},
+	"kimi-coding-plan": {
+		ChannelTypeMoonshot: {},
+	},
+	"minimax-coding-plan": {
+		ChannelTypeMiniMax: {},
+	},
+	"minimax-coding-plan-international": {
+		ChannelTypeMiniMax: {},
+	},
+	"doubao-coding-plan": {
+		ChannelTypeVolcEngine: {},
+	},
+}
+
+// ResolveChannelPlan derives the trusted plan identity from channel type and
+// the exact built-in pseudo base URL. Unknown or mismatched combinations are
+// regular channels, even if a client supplied plan-looking JSON fields.
+func ResolveChannelPlan(channelType int, baseURL string) (string, bool) {
+	planName := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if planName == "" {
+		return "", false
+	}
+	allowedTypes, ok := PlanChannelTypes[planName]
+	if !ok {
+		return "", false
+	}
+	if _, ok := allowedTypes[channelType]; !ok {
+		return "", false
+	}
+	return planName, true
 }

@@ -161,6 +161,28 @@ export function isMultiKeyChannel(channel: Channel): boolean {
   return channel.channel_info?.is_multi_key || false
 }
 
+/** Recognize saved GLM address aliases without adding a persisted form field. */
+export function getGlmAccessMode(
+  baseUrl?: string
+): 'standard' | 'glm-coding-plan' | 'glm-coding-plan-international' {
+  const normalized = (baseUrl ?? '').trim().replace(/\/+$/, '')
+  if (
+    normalized === 'glm-coding-plan' ||
+    normalized === 'glm-coding-plan-international'
+  ) {
+    return normalized
+  }
+  return 'standard'
+}
+
+/** Check whether the server identified this channel as a supported CodingPlan. */
+export function isCodingPlanChannel(channel: Channel): boolean {
+  return (
+    channel.channel_info?.is_plan === true &&
+    channel.channel_info.plan_name.trim().length > 0
+  )
+}
+
 // ============================================================================
 // Key Formatting
 // ============================================================================

@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useChannels } from './channels-provider'
 import { BalanceQueryDialog } from './dialogs/balance-query-dialog'
 import { ChannelTestDialog } from './dialogs/channel-test-dialog'
+import { CodingPlanDialog } from './dialogs/coding-plan-dialog'
 import { CopyChannelDialog } from './dialogs/copy-channel-dialog'
 import { EditTagDialog } from './dialogs/edit-tag-dialog'
 import { FetchModelsDialog } from './dialogs/fetch-models-dialog'
@@ -49,6 +50,22 @@ export function ChannelsDialogs() {
       {/* Balance Query Dialog */}
       <BalanceQueryDialog
         open={open === 'balance-query'}
+        onOpenChange={(v) => !v && setOpen(null)}
+      />
+
+      <CodingPlanDialog
+        mode='quota'
+        open={open === 'coding-plan-quota'}
+        onOpenChange={(v) => !v && setOpen(null)}
+      />
+      <CodingPlanDialog
+        mode='risk'
+        open={open === 'coding-plan-risk'}
+        onOpenChange={(v) => !v && setOpen(null)}
+      />
+      <CodingPlanDialog
+        mode='reset-cards'
+        open={open === 'coding-plan-reset-cards'}
         onOpenChange={(v) => !v && setOpen(null)}
       />
 

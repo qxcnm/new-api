@@ -67,6 +67,9 @@ func parseStatusFilter(statusParam string) int {
 }
 
 func clearChannelInfo(channel *model.Channel) {
+	if channel == nil {
+		return
+	}
 	if channel.ChannelInfo.IsMultiKey {
 		channel.ChannelInfo.MultiKeyDisabledReason = nil
 		channel.ChannelInfo.MultiKeyDisabledTime = nil
@@ -178,6 +181,9 @@ func GetAllChannels(c *gin.Context) {
 	}
 
 	for _, datum := range channelData {
+		if datum != nil {
+			datum.DetectPlan()
+		}
 		clearChannelInfo(datum)
 	}
 
@@ -385,6 +391,9 @@ func SearchChannels(c *gin.Context) {
 	pagedData := channelData[startIdx:endIdx]
 
 	for _, datum := range pagedData {
+		if datum != nil {
+			datum.DetectPlan()
+		}
 		clearChannelInfo(datum)
 	}
 
@@ -412,6 +421,7 @@ func GetChannel(c *gin.Context) {
 		return
 	}
 	if channel != nil {
+		channel.DetectPlan()
 		clearChannelInfo(channel)
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -686,6 +696,9 @@ func AddChannel(c *gin.Context) {
 		})
 		return
 	}
+	// Plan identity is derived server-side from channel type and the built-in
+	// allowlist. Ignore any plan fields supplied by the frontend.
+	addChannelRequest.Channel.DetectPlan()
 
 	addChannelRequest.Channel.CreatedTime = common.GetTimestamp()
 	keys := make([]string, 0)
@@ -1094,6 +1107,23 @@ func UpdateChannel(c *gin.Context) {
 
 	// Always copy the original ChannelInfo so that fields like IsMultiKey and MultiKeySize are retained.
 	channel.ChannelInfo = originChannel.ChannelInfo
+	// Recompute plan identity after applying the patch; client-provided fields
+	// are never trusted and old channel_info JSON remains compatible.
+	effectiveType := originChannel.Type
+	effectiveBaseURL := originChannel.BaseURL
+	if _, provided := requestData["type"]; provided {
+		effectiveType = channel.Type
+	}
+	if _, provided := requestData["base_url"]; provided {
+		effectiveBaseURL = channel.BaseURL
+	}
+	effectiveBaseURLValue := ""
+	if effectiveBaseURL != nil {
+		effectiveBaseURLValue = *effectiveBaseURL
+	}
+	planName, isPlan := constant.ResolveChannelPlan(effectiveType, effectiveBaseURLValue)
+	channel.ChannelInfo.IsPlan = isPlan
+	channel.ChannelInfo.PlanName = planName
 
 	if channelHasSensitiveChanges(&channel, originChannel, requestData) &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
@@ -1538,6 +1568,7 @@ func CopyChannel(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取渠道信息失败，请稍后重试"})
 		return
 	}
+	origin.DetectPlan()
 	if origin.Type == constant.ChannelTypeTaskPlugin &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.TaskPluginBind) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "task plugin channels require the task_plugin.bind permission"})
@@ -1549,6 +1580,7 @@ func CopyChannel(c *gin.Context) {
 	clone.Id = 0     // let DB auto-generate
 	clone.CreatedTime = common.GetTimestamp()
 	clone.Name = origin.Name + suffix
+	clone.DetectPlan()
 	clone.TestTime = 0
 	clone.ResponseTime = 0
 	if resetBalance {

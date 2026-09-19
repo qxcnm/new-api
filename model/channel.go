@@ -74,6 +74,8 @@ type ChannelInfo struct {
 	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
 	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
 	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
+	IsPlan                 bool                  `json:"is_plan"`
+	PlanName               string                `json:"plan_name"`
 }
 
 type ChannelSortOptions struct {
@@ -640,6 +642,34 @@ func (channel *Channel) GetBaseURL() string {
 		url = constant.GetChannelBaseURL(channel.Type)
 	}
 	return url
+}
+
+// DetectPlan derives the plan fields from the channel type and the exact
+// built-in pseudo base URL. Values sent by the frontend are intentionally
+// ignored so old channel_info JSON cannot grant plan privileges.
+func (channel *Channel) DetectPlan() {
+	if channel == nil {
+		return
+	}
+	planName, isPlan := constant.ResolveChannelPlan(channel.Type, channel.GetBaseURL())
+	channel.ChannelInfo.IsPlan = isPlan
+	channel.ChannelInfo.PlanName = planName
+}
+
+func (channel *Channel) IsCodingPlan() bool {
+	if channel == nil {
+		return false
+	}
+	channel.DetectPlan()
+	return channel.ChannelInfo.IsPlan
+}
+
+func (channel *Channel) GetPlanName() string {
+	if channel == nil {
+		return ""
+	}
+	channel.DetectPlan()
+	return channel.ChannelInfo.PlanName
 }
 
 func (channel *Channel) GetModelMapping() string {

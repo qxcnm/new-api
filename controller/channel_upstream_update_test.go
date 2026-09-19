@@ -7,12 +7,17 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relay/channel/volcengine"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,6 +41,85 @@ func newAdvancedCustomModelListChannel(baseURL string, key string, upstreamPath 
 	}
 	channel.SetOtherSettings(dto.ChannelOtherSettings{AdvancedCustom: config})
 	return channel
+}
+
+func TestChannelUpstreamModelURLUsesPlanResolution(t *testing.T) {
+	tests := []struct {
+		name, baseURL, want string
+		channelType         int
+	}{
+		{name: "GLM plan", channelType: constant.ChannelTypeZhipu_v4, baseURL: "glm-coding-plan", want: "https://open.bigmodel.cn/api/coding/paas/v4/models"},
+		{name: "GLM plan trailing slash", channelType: constant.ChannelTypeZhipu_v4, baseURL: "glm-coding-plan/", want: "https://open.bigmodel.cn/api/coding/paas/v4/models"},
+		{name: "Kimi plan", channelType: constant.ChannelTypeMoonshot, baseURL: "kimi-coding-plan", want: "https://api.kimi.com/coding/v1/models"},
+		{name: "regular GLM", channelType: constant.ChannelTypeZhipu_v4, baseURL: "https://open.bigmodel.cn", want: "https://open.bigmodel.cn/api/paas/v4/models"},
+		{name: "regular Volcengine", channelType: constant.ChannelTypeVolcEngine, baseURL: "https://ark.cn-beijing.volces.com", want: "https://ark.cn-beijing.volces.com/api/v3/models"},
+		{name: "custom Volcengine", channelType: constant.ChannelTypeVolcEngine, baseURL: "https://gateway.example/ark/", want: "https://gateway.example/ark/api/v3/models"},
+		{name: "regular Ali", channelType: constant.ChannelTypeAli, baseURL: "https://dashscope.aliyuncs.com", want: "https://dashscope.aliyuncs.com/compatible-mode/v1/models"},
+		{name: "mismatched type is regular", channelType: constant.ChannelTypeOpenAI, baseURL: "https://open.bigmodel.cn", want: "https://open.bigmodel.cn/v1/models"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, channelUpstreamModelURL(test.channelType, test.baseURL))
+		})
+	}
+}
+
+func TestCodingPlanMigrationPreservesVolcengineRoutes(t *testing.T) {
+	for _, tc := range []struct {
+		name, model, path string
+		mode              int
+	}{
+		{"chat", "ep-model", "/api/v3/chat/completions", relayconstant.RelayModeChatCompletions},
+		{"bot", "bot-model", "/api/v3/bots/chat/completions", relayconstant.RelayModeChatCompletions},
+		{"responses", "ep-model", "/api/v3/responses", relayconstant.RelayModeResponses},
+		{"embeddings", "ep-model", "/api/v3/embeddings", relayconstant.RelayModeEmbeddings},
+		{"images", "ep-model", "/api/v3/images/generations", relayconstant.RelayModeImagesGenerations},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := &relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAI, RelayMode: tc.mode, ChannelMeta: &relaycommon.ChannelMeta{
+				ChannelType: constant.ChannelTypeVolcEngine, ChannelBaseUrl: "https://ark.cn-beijing.volces.com", UpstreamModelName: tc.model, ApiKey: "fixture-key",
+			}}
+			adaptor := &volcengine.Adaptor{}
+			endpoint, err := adaptor.GetRequestURL(info)
+			require.NoError(t, err)
+			assert.Equal(t, "https://ark.cn-beijing.volces.com"+tc.path, endpoint)
+			headers := make(http.Header)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			require.NoError(t, adaptor.SetupRequestHeader(ctx, &headers, info))
+			assert.Equal(t, "Bearer fixture-key", headers.Get("Authorization"))
+		})
+	}
+}
+
+func TestPlanHandlersRejectRegularAndMultiKeyChannels(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	for _, tc := range []struct {
+		name, base string
+		multi      bool
+	}{
+		{"regular", "https://open.bigmodel.cn", false},
+		{"multi key plan", "glm-coding-plan", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			channel := model.Channel{Type: constant.ChannelTypeZhipu_v4, Key: "fixture-key", BaseURL: &tc.base, ChannelInfo: model.ChannelInfo{IsMultiKey: tc.multi, IsPlan: true, PlanName: "glm-coding-plan"}}
+			require.NoError(t, db.Create(&channel).Error)
+			for _, handler := range []gin.HandlerFunc{GetChannelPlanQuota, GetGLMRiskStatus, GetGLMResetCards, UseGLMResetCard} {
+				recorder := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(recorder)
+				ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(channel.Id)}}
+				ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+				handler(ctx)
+				var response struct {
+					Success bool   `json:"success"`
+					Message string `json:"message"`
+				}
+				require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+				assert.False(t, response.Success)
+				assert.NotContains(t, response.Message, "fixture-key")
+			}
+		})
+	}
 }
 
 func TestParseOpenAIModelIDsStrictResponseContract(t *testing.T) {

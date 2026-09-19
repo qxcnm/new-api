@@ -47,6 +47,7 @@ import {
   useMemo,
   useCallback,
   useRef,
+  useId,
 } from 'react'
 import { type SubmitErrorHandler, useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -80,6 +81,7 @@ import {
 } from '@/components/ui/form'
 import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { PopoverDescription, PopoverTitle } from '@/components/ui/popover'
 import {
   Select,
@@ -159,6 +161,7 @@ import {
   channelFormSchema,
   channelsQueryKeys,
   getAdvancedCustomStats,
+  getGlmAccessMode,
   transformChannelToFormDefaults,
   type ChannelFormValues,
   deduplicateKeys,
@@ -519,6 +522,10 @@ export function ChannelMutateDrawer({
     defaultBaseURLs?.[currentType] || t(FIELD_PLACEHOLDERS.BASE_URL)
   const currentStatus = formValues.status
   const currentBaseUrl = formValues.base_url
+  const glmAccessMode = getGlmAccessMode(currentBaseUrl)
+  const glmAccessModeId = useId()
+  const glmStandardBaseUrl = useRef('')
+  const isGlmCodingPlan = currentType === 26 && glmAccessMode !== 'standard'
   const currentTaskPluginKey = formValues.task_plugin_key
   const currentKey = formValues.key
   const currentModels = formValues.models
@@ -729,6 +736,9 @@ export function ChannelMutateDrawer({
         setChoosingProvider(false)
         return
       }
+      const leavingGlmPlan =
+        form.getValues('type') === 26 &&
+        getGlmAccessMode(form.getValues('base_url')) !== 'standard'
       if (target.kind === 'plugin') {
         if (!canBindTaskPlugin) return
         const plugin = taskPluginOptionsQuery.data?.find(
@@ -749,12 +759,12 @@ export function ChannelMutateDrawer({
           })
         }
         const baseUrl = nextTaskPluginBaseUrl(
-          form.getValues('base_url'),
+          leavingGlmPlan ? '' : form.getValues('base_url'),
           previousPlugin?.baseUrl,
           plugin.baseUrl
         )
-        if (baseUrl !== null) {
-          form.setValue('base_url', baseUrl, {
+        if (baseUrl !== null || leavingGlmPlan) {
+          form.setValue('base_url', baseUrl ?? '', {
             shouldDirty: true,
             shouldValidate: true,
           })
@@ -767,6 +777,9 @@ export function ChannelMutateDrawer({
         ) {
           return
         }
+        if (leavingGlmPlan) {
+          form.setValue('base_url', '', { shouldDirty: true })
+        }
         form.setValue('type', target.type, { shouldDirty: true })
         if (!isEditing && !providerTarget && !form.getValues('name').trim()) {
           const label = CHANNEL_TYPE_OPTIONS.find(
@@ -775,6 +788,7 @@ export function ChannelMutateDrawer({
           form.setValue('name', label ? t(label) : `#${target.type}`)
         }
       }
+      glmStandardBaseUrl.current = ''
       setProviderTarget(target)
       setChoosingProvider(false)
     },
@@ -924,6 +938,7 @@ export function ChannelMutateDrawer({
   // Load channel data into form when editing
   useEffect(() => {
     if (!open) {
+      glmStandardBaseUrl.current = ''
       setModelConfiguration(null)
       form.reset(CHANNEL_FORM_DEFAULT_VALUES)
       loadedForm.current = null
@@ -944,6 +959,7 @@ export function ChannelMutateDrawer({
         return
       }
       const defaults = transformChannelToFormDefaults(channelData.data)
+      glmStandardBaseUrl.current = ''
       form.reset(defaults)
       loadedForm.current = {
         channelId: channelData.data.id,
@@ -3672,8 +3688,59 @@ export function ChannelMutateDrawer({
               />
             )}
 
+            {currentType === 26 && (
+              <div className='grid gap-2'>
+                <Label htmlFor={glmAccessModeId}>{t('Access mode')}</Label>
+                <Select
+                  disabled={sensitiveLocked}
+                  value={glmAccessMode}
+                  items={[
+                    { value: 'standard', label: t('Standard API') },
+                    {
+                      value: 'glm-coding-plan',
+                      label: t('CodingPlan (China)'),
+                    },
+                    {
+                      value: 'glm-coding-plan-international',
+                      label: t('CodingPlan (International)'),
+                    },
+                  ]}
+                  onValueChange={(value) => {
+                    if (!value || sensitiveLocked || value === glmAccessMode) {
+                      return
+                    }
+                    if (glmAccessMode === 'standard') {
+                      glmStandardBaseUrl.current = currentBaseUrl ?? ''
+                    }
+                    form.setValue(
+                      'base_url',
+                      value === 'standard' ? glmStandardBaseUrl.current : value,
+                      { shouldDirty: true, shouldValidate: true }
+                    )
+                  }}
+                >
+                  <SelectTrigger id={glmAccessModeId}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent alignItemWithTrigger={false}>
+                    <SelectGroup>
+                      <SelectItem value='standard'>
+                        {t('Standard API')}
+                      </SelectItem>
+                      <SelectItem value='glm-coding-plan'>
+                        {t('CodingPlan (China)')}
+                      </SelectItem>
+                      <SelectItem value='glm-coding-plan-international'>
+                        {t('CodingPlan (International)')}
+                      </SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
             {/* General base_url for other types */}
-            {![3, 8, 22, 36, 45].includes(currentType) && (
+            {![3, 8, 22, 36, 45].includes(currentType) && !isGlmCodingPlan && (
               <FormField
                 control={form.control}
                 name='base_url'

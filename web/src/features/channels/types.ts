@@ -25,6 +25,8 @@ import type { ModelSchedules } from './lib/model-schedules'
 // ============================================================================
 
 export const channelInfoSchema = z.object({
+  is_plan: z.boolean().default(false),
+  plan_name: z.string().default(''),
   is_multi_key: z.boolean().default(false),
   multi_key_size: z.number().default(0),
   multi_key_status_list: z.record(z.string(), z.number()).optional(),
@@ -68,6 +70,8 @@ export const channelSchema = z.object({
   remark: z.string().default(''),
   max_input_tokens: z.number().default(0),
   channel_info: channelInfoSchema.default({
+    is_plan: false,
+    plan_name: '',
     is_multi_key: false,
     multi_key_size: 0,
     multi_key_polling_index: 0,
@@ -203,6 +207,55 @@ export interface ChannelBalanceResponse {
   balance?: number
   currency?: string
   raw_response?: string
+}
+
+export interface CodingPlanTier {
+  name: string
+  percentage?: number
+  used: number
+  limit: number
+  remaining: number
+  resets_at?: string
+  status?: string
+}
+
+export interface CodingPlanQuotaResponse {
+  success: boolean
+  message?: string
+  data?: {
+    plan_name: string
+    quota_supported: boolean
+    credential?: string
+    product_name?: string
+    plan_version?: string
+    tiers: CodingPlanTier[]
+  }
+}
+
+export interface CodingPlanRiskResponse {
+  success: boolean
+  message?: string
+  data?: {
+    plan_name: string
+    status: 'normal' | 'risk' | 'unknown'
+  }
+}
+
+export interface CodingPlanResetCard {
+  recordId: number
+  expireTime: string
+  available: boolean
+  priority?: boolean
+}
+
+export interface CodingPlanResetCardsResponse {
+  success: boolean
+  message?: string
+  data?: {
+    plan_name: string
+    five_hour_resets: CodingPlanResetCard[]
+    week_resets: CodingPlanResetCard[]
+  }
 }
 
 export interface FetchModelsResponse {

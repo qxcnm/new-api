@@ -174,6 +174,174 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+test.each([
+  ['CodingPlan (China)', 'glm-coding-plan'],
+  ['CodingPlan (International)', 'glm-coding-plan-international'],
+])(
+  'GLM access mode %s fills the saved address while editing keeps saved model discovery',
+  async (label, baseUrl) => {
+    editingChannel.type = 26
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    const mode = await screen.findByRole('combobox', { name: 'Access mode' })
+    expect(mode).toHaveTextContent('Standard API')
+    await user.click(mode)
+    await user.click(screen.getByRole('option', { name: label }))
+    expect(mode).toHaveTextContent(label)
+    expect(
+      screen.queryByRole('textbox', { name: 'Base URL' })
+    ).not.toBeInTheDocument()
+    await user.click(
+      screen.getByRole('button', { name: 'Fetch from Upstream' })
+    )
+    await waitFor(() =>
+      expect(api.get).toHaveBeenCalledWith(
+        '/api/channel/fetch_models/42',
+        expect.anything()
+      )
+    )
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith(
+        '/api/channel/',
+        expect.objectContaining({ id: 42, type: 26, base_url: baseUrl }),
+        expect.anything()
+      )
+    )
+    expect(put.mock.calls[0]?.[1]).not.toHaveProperty('is_plan')
+    expect(put.mock.calls[0]?.[1]).not.toHaveProperty('plan_name')
+  }
+)
+
+test.each([
+  ['glm-coding-plan', 'CodingPlan (China)', 'glm-coding-plan'],
+  [
+    ' glm-coding-plan-international/ ',
+    'CodingPlan (International)',
+    'glm-coding-plan-international',
+  ],
+])(
+  'GLM access mode recognizes the existing alias %s and retains the plan on save',
+  async (baseUrl, label, savedBaseUrl) => {
+    editingChannel.type = 26
+    editingChannel.base_url = baseUrl
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    expect(
+      await screen.findByRole('combobox', { name: 'Access mode' })
+    ).toHaveTextContent(label)
+    expect(
+      screen.queryByRole('textbox', { name: 'Base URL' })
+    ).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Name *'), {
+      target: { value: 'Renamed GLM' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[1]).toMatchObject({
+      type: 26,
+      base_url: savedBaseUrl,
+    })
+  }
+)
+
+test('GLM access mode fills the model discovery address before creating a channel', async () => {
+  const post = vi
+    .spyOn(api, 'post')
+    .mockResolvedValue({ data: { success: true, data: ['glm-4.5'] } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(
+    screen.getByRole('option', { name: 'Zhipu GLM Built-in #26' })
+  )
+  await user.click(screen.getByRole('combobox', { name: 'Access mode' }))
+  await user.click(screen.getByRole('option', { name: 'CodingPlan (China)' }))
+  fireEvent.change(screen.getByLabelText('API Key *'), {
+    target: { value: 'fixture-key' },
+  })
+  await user.click(screen.getByRole('button', { name: 'Fetch from Upstream' }))
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/channel/fetch_models',
+      expect.objectContaining({
+        type: 26,
+        base_url: 'glm-coding-plan',
+        key: 'fixture-key',
+      }),
+      expect.anything()
+    )
+  )
+})
+
+test('GLM access mode restores the standard address when switching back with the keyboard', async () => {
+  editingChannel.type = 26
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  const mode = await screen.findByRole('combobox', { name: 'Access mode' })
+  fireEvent.change(screen.getByRole('textbox', { name: 'Base URL' }), {
+    target: { value: 'https://custom-glm.example' },
+  })
+  await user.click(mode)
+  await user.click(screen.getByRole('option', { name: 'CodingPlan (China)' }))
+  mode.focus()
+  await user.keyboard('{Enter}{Home}{Enter}')
+  expect(mode).toHaveTextContent('Standard API')
+  expect(screen.getByRole('textbox', { name: 'Base URL' })).toHaveValue(
+    'https://custom-glm.example'
+  )
+})
+
+test.each([
+  ['DeepSeek Built-in #43', ''],
+  ['Video A Plugin video-a', 'https://a.example'],
+  ['No Address Plugin no-address', ''],
+])(
+  'GLM access mode clears its alias when switching to %s',
+  async (provider, baseUrl) => {
+    editingChannel.type = 26
+    editingChannel.base_url = 'glm-coding-plan'
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByRole('combobox', { name: 'Access mode' })
+    await user.click(screen.getByRole('button', { name: 'Change provider' }))
+    await user.click(await screen.findByRole('option', { name: provider }))
+    expect(
+      screen.queryByRole('combobox', { name: 'Access mode' })
+    ).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: /Base URL/ })).toHaveValue(
+      baseUrl
+    )
+  }
+)
+
+test('GLM access mode is disabled without sensitive write permission', async () => {
+  editingChannel.type = 26
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: {
+        id: 10,
+        username: 'operator',
+        role: ROLE.ADMIN,
+        permissions: {
+          admin_permissions: { channel: { read: true, write: true } },
+        },
+      },
+    },
+  })
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  expect(
+    await screen.findByRole('combobox', { name: 'Access mode' })
+  ).toBeDisabled()
+  expect(screen.getByRole('textbox', { name: 'Base URL' })).toBeDisabled()
+})
+
 test('changing built-in providers updates server-provided URL placeholders without replacing the draft address', async () => {
   const user = userEvent.setup()
   render(<ConfigurationHarness />)

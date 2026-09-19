@@ -19,6 +19,17 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  // CodingPlan management API errors.
+  'invalid channel id',
+  'channel not found',
+  'CodingPlan queries do not support multi-key channels',
+  'channel is not a supported CodingPlan channel',
+  'CodingPlan credential is invalid or expired',
+  'CodingPlan upstream request failed',
+  'GLM risk status is only available for GLM CodingPlan channels',
+  'Reset cards are only available for GLM CodingPlan channels',
+  'invalid reset card request',
+  'reset card is unavailable or expired',
   // Per-model weekly availability validation.
   'Model schedules must be a JSON object containing arrays of time windows',
   'Model schedule keys must be non-empty model names without surrounding spaces',

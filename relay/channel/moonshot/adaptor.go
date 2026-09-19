@@ -48,7 +48,12 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	baseURL := info.ChannelBaseUrl
-	if specialPlan, ok := channelconstant.ChannelSpecialBases[baseURL]; ok {
+	if baseURL == "" {
+		baseURL = channelconstant.GetChannelBaseURL(channelconstant.ChannelTypeMoonshot)
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	planName, isPlan := channelconstant.ResolveChannelPlan(info.ChannelType, baseURL)
+	if specialPlan, ok := channelconstant.ChannelSpecialBases[planName]; ok && isPlan {
 		if info.RelayFormat == types.RelayFormatClaude {
 			return fmt.Sprintf("%s/v1/messages", specialPlan.ClaudeBaseURL), nil
 		}
@@ -59,18 +64,18 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 
 	switch info.RelayFormat {
 	case types.RelayFormatClaude:
-		return fmt.Sprintf("%s/anthropic/v1/messages", info.ChannelBaseUrl), nil
+		return fmt.Sprintf("%s/anthropic/v1/messages", baseURL), nil
 	default:
 		if info.RelayMode == constant.RelayModeRerank {
-			return fmt.Sprintf("%s/v1/rerank", info.ChannelBaseUrl), nil
+			return fmt.Sprintf("%s/v1/rerank", baseURL), nil
 		} else if info.RelayMode == constant.RelayModeEmbeddings {
-			return fmt.Sprintf("%s/v1/embeddings", info.ChannelBaseUrl), nil
+			return fmt.Sprintf("%s/v1/embeddings", baseURL), nil
 		} else if info.RelayMode == constant.RelayModeChatCompletions {
-			return fmt.Sprintf("%s/v1/chat/completions", info.ChannelBaseUrl), nil
+			return fmt.Sprintf("%s/v1/chat/completions", baseURL), nil
 		} else if info.RelayMode == constant.RelayModeCompletions {
-			return fmt.Sprintf("%s/v1/completions", info.ChannelBaseUrl), nil
+			return fmt.Sprintf("%s/v1/completions", baseURL), nil
 		}
-		return fmt.Sprintf("%s/v1/chat/completions", info.ChannelBaseUrl), nil
+		return fmt.Sprintf("%s/v1/chat/completions", baseURL), nil
 	}
 }
 

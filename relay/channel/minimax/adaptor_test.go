@@ -8,12 +8,35 @@ import (
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 )
+
+func TestGetRequestURLUsesCodingPlanClaudeEndpoint(t *testing.T) {
+	info := &relaycommon.RelayInfo{RelayFormat: types.RelayFormatClaude, ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeMiniMax, ChannelBaseUrl: "minimax-coding-plan-international"}}
+	got, err := GetRequestURL(info)
+	require.NoError(t, err)
+	want := "https://api.minimax.io/anthropic/v1/messages"
+	require.Equal(t, want, got)
+	info.RelayFormat = types.RelayFormatOpenAIResponses
+	info.RelayMode = relayconstant.RelayModeResponses
+	_, err = GetRequestURL(info)
+	require.Error(t, err)
+	info.RelayFormat = types.RelayFormatOpenAI
+	info.RelayMode = relayconstant.RelayModeChatCompletions
+	_, err = GetRequestURL(info)
+	require.Error(t, err)
+	info.ChannelBaseUrl = "https://api.minimaxi.com"
+	got, err = GetRequestURL(info)
+	require.NoError(t, err)
+	require.Equal(t, "https://api.minimaxi.com/v1/text/chatcompletion_v2", got)
+}
 
 func TestGetRequestURLForImageGeneration(t *testing.T) {
 	t.Parallel()

@@ -33,6 +33,9 @@ import {
   Trash2,
   RefreshCw,
   Loader2,
+  ShieldCheck,
+  CreditCard,
+  RotateCcw,
 } from 'lucide-react'
 import { useContext, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -66,6 +69,7 @@ import {
   handleTestChannel,
   handleToggleChannelStatus,
   isChannelEnabled,
+  isCodingPlanChannel,
   isMultiKeyChannel,
 } from '../lib'
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
@@ -90,6 +94,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
 
   const isEnabled = isChannelEnabled(channel)
   const isMultiKey = isMultiKeyChannel(channel)
+  const isCodingPlan = isCodingPlanChannel(channel)
   const canEditSensitive = hasPermission(
     currentUser,
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
@@ -126,6 +131,21 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const handleFetchModels = () => {
     setCurrentRow(channel)
     setOpen('fetch-models')
+  }
+
+  const handleCodingPlanQuota = () => {
+    setCurrentRow(channel)
+    setOpen('coding-plan-quota')
+  }
+
+  const handleCodingPlanRisk = () => {
+    setCurrentRow(channel)
+    setOpen('coding-plan-risk')
+  }
+
+  const handleCodingPlanResetCards = () => {
+    setCurrentRow(channel)
+    setOpen('coding-plan-reset-cards')
   }
 
   const handleManageOllamaModels = () => {
@@ -288,6 +308,33 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
               <DollarSign size={16} />
             </DropdownMenuShortcut>
           </DropdownMenuItem>
+
+          {isCodingPlan && (
+            <>
+              <DropdownMenuItem onClick={handleCodingPlanQuota}>
+                {t('View Quota')}
+                <DropdownMenuShortcut>
+                  <CreditCard size={16} />
+                </DropdownMenuShortcut>
+              </DropdownMenuItem>
+              {channel.channel_info.plan_name.startsWith('glm-') && (
+                <>
+                  <DropdownMenuItem onClick={handleCodingPlanRisk}>
+                    {t('Risk Control Status')}
+                    <DropdownMenuShortcut>
+                      <ShieldCheck size={16} />
+                    </DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleCodingPlanResetCards}>
+                    {t('Reset Cards')}
+                    <DropdownMenuShortcut>
+                      <RotateCcw size={16} />
+                    </DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                </>
+              )}
+            </>
+          )}
 
           {/* Fetch Models */}
           <DropdownMenuItem onClick={handleFetchModels}>

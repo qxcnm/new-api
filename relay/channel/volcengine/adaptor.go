@@ -38,9 +38,11 @@ func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dt
 }
 
 func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, req *dto.ClaudeRequest) (any, error) {
-	if _, ok := channelconstant.ChannelSpecialBases[info.ChannelBaseUrl]; ok {
-		adaptor := claude.Adaptor{}
-		return adaptor.ConvertClaudeRequest(c, info, req)
+	if planName, ok := channelconstant.ResolveChannelPlan(info.ChannelType, info.ChannelBaseUrl); ok {
+		if _, exists := channelconstant.ChannelSpecialBases[planName]; exists {
+			adaptor := claude.Adaptor{}
+			return adaptor.ConvertClaudeRequest(c, info, req)
+		}
 	}
 	adaptor := openai.Adaptor{}
 	return adaptor.ConvertClaudeRequest(c, info, req)
@@ -241,7 +243,12 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if baseUrl == "" {
 		baseUrl = channelconstant.GetChannelBaseURL(channelconstant.ChannelTypeVolcEngine)
 	}
-	specialPlan, hasSpecialPlan := channelconstant.ChannelSpecialBases[baseUrl]
+	baseUrl = strings.TrimRight(baseUrl, "/")
+	planName, isPlan := channelconstant.ResolveChannelPlan(info.ChannelType, baseUrl)
+	specialPlan, hasSpecialPlan := channelconstant.ChannelSpecialBases[planName]
+	if !isPlan {
+		hasSpecialPlan = false
+	}
 
 	switch info.RelayFormat {
 	case types.RelayFormatClaude:
@@ -348,9 +355,11 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
 	if info.RelayFormat == types.RelayFormatClaude {
-		if _, ok := channelconstant.ChannelSpecialBases[info.ChannelBaseUrl]; ok {
-			adaptor := claude.Adaptor{}
-			return adaptor.DoResponse(c, resp, info)
+		if planName, ok := channelconstant.ResolveChannelPlan(info.ChannelType, info.ChannelBaseUrl); ok {
+			if _, exists := channelconstant.ChannelSpecialBases[planName]; exists {
+				adaptor := claude.Adaptor{}
+				return adaptor.DoResponse(c, resp, info)
+			}
 		}
 	}
 

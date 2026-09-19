@@ -26,6 +26,9 @@ import type {
   BatchSetTagParams,
   Channel,
   ChannelBalanceResponse,
+  CodingPlanQuotaResponse,
+  CodingPlanResetCardsResponse,
+  CodingPlanRiskResponse,
   ChannelOpsResponse,
   ChannelTestResponse,
   CopyChannelParams,
@@ -262,6 +265,52 @@ export async function updateChannelBalance(
   const res = await api.get(
     `/api/channel/update_balance/${id}`,
     channelActionConfig()
+  )
+  return res.data
+}
+
+export async function getCodingPlanQuota(
+  channelId: number
+): Promise<CodingPlanQuotaResponse> {
+  const res = await api.get(
+    `/api/channel/plan/quota/${channelId}`,
+    channelActionConfig({ disableDuplicate: true })
+  )
+  return res.data
+}
+
+export async function getGLMRiskStatus(
+  channelId: number
+): Promise<CodingPlanRiskResponse> {
+  const res = await api.get(
+    `/api/channel/plan/glm/risk/${channelId}`,
+    channelActionConfig({ disableDuplicate: true })
+  )
+  return res.data
+}
+
+export async function getGLMResetCards(
+  channelId: number
+): Promise<CodingPlanResetCardsResponse> {
+  const res = await api.get(
+    `/api/channel/plan/glm/reset_cards/${channelId}`,
+    channelActionConfig({ disableDuplicate: true })
+  )
+  return res.data
+}
+
+export async function resetGLMCard(
+  channelId: number,
+  data: { record_id: number; reset_type: 'FIVE_HOUR' | 'WEEK' }
+): Promise<{
+  success: boolean
+  message?: string
+  data?: { record_id: number }
+}> {
+  const res = await api.post(
+    `/api/channel/plan/glm/reset_cards/${channelId}/use`,
+    data,
+    channelActionConfig({ disableDuplicate: true })
   )
   return res.data
 }

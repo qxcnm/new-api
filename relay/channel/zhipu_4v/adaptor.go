@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	channelconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relay/channel"
@@ -49,7 +50,12 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if baseURL == "" {
 		baseURL = channelconstant.GetChannelBaseURL(channelconstant.ChannelTypeZhipu_v4)
 	}
-	specialPlan, hasSpecialPlan := channelconstant.ChannelSpecialBases[baseURL]
+	baseURL = strings.TrimRight(baseURL, "/")
+	planName, isPlan := channelconstant.ResolveChannelPlan(info.ChannelType, baseURL)
+	specialPlan, hasSpecialPlan := channelconstant.ChannelSpecialBases[planName]
+	if !isPlan {
+		hasSpecialPlan = false
+	}
 
 	switch info.RelayFormat {
 	case types.RelayFormatClaude:
@@ -69,7 +75,10 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 				return fmt.Sprintf("%s/images/generations", specialPlan.OpenAIBaseURL), nil
 			}
 			return fmt.Sprintf("%s/api/paas/v4/images/generations", baseURL), nil
-		case relayconstant.RelayModeResponses:
+		case relayconstant.RelayModeResponses, relayconstant.RelayModeResponsesCompact:
+			if hasSpecialPlan && specialPlan.ResponsesBaseURL != "" {
+				return fmt.Sprintf("%s/responses", specialPlan.ResponsesBaseURL), nil
+			}
 			return fmt.Sprintf("%s/api/v1/responses", baseURL), nil
 		default:
 			if hasSpecialPlan && specialPlan.OpenAIBaseURL != "" {

@@ -2,6 +2,7 @@ package minimax
 
 import (
 	"fmt"
+	"strings"
 
 	channelconstant "github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -14,9 +15,17 @@ func GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if baseUrl == "" {
 		baseUrl = channelconstant.GetChannelBaseURL(channelconstant.ChannelTypeMiniMax)
 	}
+	baseUrl = strings.TrimRight(baseUrl, "/")
+	planName, isPlan := channelconstant.ResolveChannelPlan(info.ChannelType, baseUrl)
+	if isPlan && info.RelayFormat != types.RelayFormatClaude {
+		return "", fmt.Errorf("unsupported CodingPlan relay format: %s", info.RelayFormat)
+	}
 	switch info.RelayFormat {
 	case types.RelayFormatClaude:
-		return fmt.Sprintf("%s/anthropic/v1/messages", info.ChannelBaseUrl), nil
+		if specialPlan, ok := channelconstant.ChannelSpecialBases[planName]; ok && isPlan && specialPlan.ClaudeBaseURL != "" {
+			return fmt.Sprintf("%s/v1/messages", specialPlan.ClaudeBaseURL), nil
+		}
+		return fmt.Sprintf("%s/anthropic/v1/messages", baseUrl), nil
 	default:
 		switch info.RelayMode {
 		case constant.RelayModeChatCompletions:
