@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/controller"
@@ -22,6 +23,27 @@ func TestChannelDefaultBaseURLsRequireReadPermission(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/channel/default_base_urls", nil))
 	assert.Equal(t, http.StatusUnauthorized, recorder.Code)
+}
+
+func TestCodingPlanQueriesRequireChannelReadPermission(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	registerChannelRoutes(engine.Group("/api"))
+	for _, route := range []struct {
+		path    string
+		handler gin.HandlerFunc
+	}{
+		{"/plan/keys/:id", controller.GetCodingPlanKeyOptions},
+		{"/plan/quota/:id", controller.GetChannelPlanQuota},
+		{"/plan/glm/risk/:id", controller.GetGLMRiskStatus},
+	} {
+		t.Run(route.path, func(t *testing.T) {
+			assertChannelRoutePermission(t, http.MethodGet, route.path, authz.ChannelRead, route.handler)
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/channel"+strings.ReplaceAll(route.path, ":id", "1")+"?key_index=0", nil))
+			assert.Equal(t, http.StatusUnauthorized, recorder.Code)
+		})
+	}
 }
 
 func TestChannelStatusRoutesUseOperatePermission(t *testing.T) {

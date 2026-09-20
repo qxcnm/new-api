@@ -2,13 +2,18 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -18,7 +23,10 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service/planquota"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -92,32 +100,399 @@ func TestCodingPlanMigrationPreservesVolcengineRoutes(t *testing.T) {
 	}
 }
 
-func TestPlanHandlersRejectRegularAndMultiKeyChannels(t *testing.T) {
+type codingPlanTestTransport func(*http.Request) (*http.Response, error)
+
+func (transport codingPlanTestTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+func useCodingPlanTestTransport(t *testing.T, transport codingPlanTestTransport) {
+	t.Helper()
+	originalFactory := newPlanQuotaClient
+	newPlanQuotaClient = func(string) (*planquota.Client, error) {
+		return planquota.NewClientWithHTTPClient(&http.Client{Transport: transport, Timeout: 15 * time.Second}), nil
+	}
+	t.Cleanup(func() { newPlanQuotaClient = originalFactory })
+}
+
+func codingPlanHandlerResponse(handler gin.HandlerFunc, channelID, query string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: channelID}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/"+query, nil)
+	handler(ctx)
+	return recorder
+}
+
+func TestPlanHandlersRejectRegularAndUnsupportedMultiKeyOperations(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
+	useCodingPlanTestTransport(t, func(*http.Request) (*http.Response, error) {
+		t.Error("rejected channel must not query upstream")
+		return nil, errors.New("unexpected upstream request")
+	})
 	for _, tc := range []struct {
 		name, base string
+		kind       int
 		multi      bool
+		handlers   []gin.HandlerFunc
 	}{
-		{"regular", "https://open.bigmodel.cn", false},
-		{"multi key plan", "glm-coding-plan", true},
+		{"regular GLM", "https://open.bigmodel.cn", constant.ChannelTypeZhipu_v4, false, []gin.HandlerFunc{GetCodingPlanKeyOptions, GetChannelPlanQuota, GetGLMRiskStatus, GetGLMResetCards, UseGLMResetCard}},
+		{"regular OpenAI", "https://api.openai.com", constant.ChannelTypeOpenAI, false, []gin.HandlerFunc{GetCodingPlanKeyOptions, GetChannelPlanQuota, GetGLMRiskStatus}},
+		{"multi GLM reset cards", planquota.PlanGLMDomestic, constant.ChannelTypeZhipu_v4, true, []gin.HandlerFunc{GetGLMResetCards, UseGLMResetCard}},
+		{"multi Kimi", planquota.PlanKimi, constant.ChannelTypeMoonshot, true, []gin.HandlerFunc{GetCodingPlanKeyOptions, GetChannelPlanQuota, GetGLMRiskStatus}},
+		{"multi MiniMax", planquota.PlanMiniMax, constant.ChannelTypeMiniMax, true, []gin.HandlerFunc{GetCodingPlanKeyOptions, GetChannelPlanQuota, GetGLMRiskStatus}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			channel := model.Channel{Type: constant.ChannelTypeZhipu_v4, Key: "fixture-key", BaseURL: &tc.base, ChannelInfo: model.ChannelInfo{IsMultiKey: tc.multi, IsPlan: true, PlanName: "glm-coding-plan"}}
+			channel := model.Channel{Type: tc.kind, Key: "first-secret\nsecond-secret", BaseURL: &tc.base, ChannelInfo: model.ChannelInfo{IsMultiKey: tc.multi}}
 			require.NoError(t, db.Create(&channel).Error)
-			for _, handler := range []gin.HandlerFunc{GetChannelPlanQuota, GetGLMRiskStatus, GetGLMResetCards, UseGLMResetCard} {
-				recorder := httptest.NewRecorder()
-				ctx, _ := gin.CreateTestContext(recorder)
-				ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(channel.Id)}}
-				ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-				handler(ctx)
-				var response struct {
+			for _, handler := range tc.handlers {
+				response := codingPlanHandlerResponse(handler, strconv.Itoa(channel.Id), "?key_index=0")
+				assert.Contains(t, response.Body.String(), `"success":false`)
+				assert.NotContains(t, response.Body.String(), "first-secret")
+				assert.NotContains(t, response.Body.String(), "second-secret")
+			}
+		})
+	}
+	for _, channelID := range []string{"invalid", "0", "-1", "999999"} {
+		for _, handler := range []gin.HandlerFunc{GetCodingPlanKeyOptions, GetChannelPlanQuota, GetGLMRiskStatus} {
+			response := codingPlanHandlerResponse(handler, channelID, "?key_index=0")
+			assert.Contains(t, response.Body.String(), `"success":false`)
+		}
+	}
+}
+
+func TestPlanKeySelectsRequestedEnabledMultiKey(t *testing.T) {
+	channel := &model.Channel{
+		Key: "disabled-secret\nselected-secret\n \n",
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:         true,
+			MultiKeySize:       99,
+			MultiKeyStatusList: map[int]int{0: common.ChannelStatusManuallyDisabled},
+		},
+	}
+
+	for _, tc := range []struct {
+		name, query, wantKey, wantError string
+	}{
+		{name: "selected enabled key", query: "?key_index=1", wantKey: "selected-secret"},
+		{name: "selection required", wantError: "CodingPlan key selection is required"},
+		{name: "raw key is not a selection", query: "?key=attacker-secret", wantError: "CodingPlan key selection is required"},
+		{name: "raw key ignored", query: "?key_index=1&key=attacker-secret", wantKey: "selected-secret"},
+		{name: "empty index", query: "?key_index=", wantError: "CodingPlan key selection is invalid"},
+		{name: "malformed index", query: "?key_index=second", wantError: "CodingPlan key selection is invalid"},
+		{name: "negative index", query: "?key_index=-1", wantError: "CodingPlan key selection is invalid"},
+		{name: "out of range despite metadata", query: "?key_index=4", wantError: "CodingPlan key selection is invalid"},
+		{name: "overflow index", query: "?key_index=18446744073709551616", wantError: "CodingPlan key selection is invalid"},
+		{name: "duplicate index", query: "?key_index=1&key_index=0", wantError: "CodingPlan key selection is invalid"},
+		{name: "disabled key", query: "?key_index=0", wantError: "The selected CodingPlan key is disabled"},
+		{name: "missing key", query: "?key_index=2", wantError: "The selected CodingPlan key is missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/"+tc.query, nil)
+			key, err := planKey(ctx, channel, true)
+			if tc.wantError != "" {
+				require.EqualError(t, err, tc.wantError)
+				assert.NotContains(t, err.Error(), "disabled-secret")
+				assert.NotContains(t, err.Error(), "selected-secret")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantKey, key)
+		})
+	}
+
+	single := &model.Channel{Key: "single-secret"}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	key, err := planKey(ctx, single, false)
+	require.NoError(t, err)
+	assert.Equal(t, single.Key, key)
+}
+
+func TestGetCodingPlanKeyOptionsReturnsOnlyMaskedIdentifiers(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	baseURL := "glm-coding-plan"
+	channel := model.Channel{
+		Type:    constant.ChannelTypeZhipu_v4,
+		Key:     "first-full-secret-abcd\nsecond-full-secret-wxyz\n \nz9q\nfifth-secret-efgh",
+		BaseURL: &baseURL,
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:         true,
+			MultiKeySize:       99,
+			MultiKeyStatusList: map[int]int{0: common.ChannelStatusManuallyDisabled, 4: common.ChannelStatusAutoDisabled},
+		},
+	}
+	require.NoError(t, db.Create(&channel).Error)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(channel.Id)}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	GetCodingPlanKeyOptions(ctx)
+
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Keys []struct {
+				Index      int    `json:"index"`
+				Identifier string `json:"identifier"`
+				Enabled    bool   `json:"enabled"`
+			} `json:"keys"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	require.Len(t, response.Data.Keys, 5)
+	assert.Equal(t, "****abcd", response.Data.Keys[0].Identifier)
+	assert.False(t, response.Data.Keys[0].Enabled)
+	assert.Equal(t, "****wxyz", response.Data.Keys[1].Identifier)
+	assert.True(t, response.Data.Keys[1].Enabled)
+	assert.Equal(t, "****", response.Data.Keys[2].Identifier)
+	assert.False(t, response.Data.Keys[2].Enabled)
+	assert.Equal(t, "****", response.Data.Keys[3].Identifier)
+	assert.True(t, response.Data.Keys[3].Enabled)
+	assert.Equal(t, "****efgh", response.Data.Keys[4].Identifier)
+	assert.False(t, response.Data.Keys[4].Enabled)
+	for index, option := range response.Data.Keys {
+		assert.Equal(t, index, option.Index)
+	}
+	assert.NotContains(t, recorder.Body.String(), "first-full-secret")
+	assert.NotContains(t, recorder.Body.String(), "second-full-secret")
+	assert.NotContains(t, recorder.Body.String(), "z9q")
+}
+
+func TestPlanHandlersUseOnlySelectedMultiKey(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	for _, plan := range []string{planquota.PlanGLMDomestic, planquota.PlanGLMInternational} {
+		for _, multi := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/multi=%t", plan, multi), func(t *testing.T) {
+				channel := model.Channel{Type: constant.ChannelTypeZhipu_v4, Key: "selected-secret", BaseURL: &plan, ChannelInfo: model.ChannelInfo{IsMultiKey: multi, MultiKeySize: 99}}
+				query := ""
+				if multi {
+					channel.Key = "unused-secret\nselected-secret"
+					channel.ChannelInfo.MultiKeyStatusList = map[int]int{0: common.ChannelStatusManuallyDisabled}
+					query = "?key_index=1&key=attacker-secret"
+				}
+				require.NoError(t, db.Create(&channel).Error)
+				var requests []string
+				useCodingPlanTestTransport(t, func(request *http.Request) (*http.Response, error) {
+					assert.Equal(t, "selected-secret", request.Header.Get("Authorization"))
+					assert.Equal(t, http.MethodGet, request.Method)
+					_, hasDeadline := request.Context().Deadline()
+					assert.True(t, hasDeadline)
+					requests = append(requests, request.URL.Host+request.URL.Path)
+					body := `{"data":{"limits":[]}}`
+					switch request.URL.Path {
+					case "/api/biz/subscription/list":
+						body = `{"data":[{"productName":"GLM Coding Max"}]}`
+					case "/api/biz/labelCustomer/isRiskCustomer":
+						body = `{"success":true,"data":false}`
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+				})
+				for _, handler := range []gin.HandlerFunc{GetChannelPlanQuota, GetGLMRiskStatus} {
+					response := codingPlanHandlerResponse(handler, strconv.Itoa(channel.Id), query)
+					assert.Contains(t, response.Body.String(), `"success":true`)
+					for _, key := range []string{"unused-secret", "selected-secret", "attacker-secret"} {
+						assert.NotContains(t, response.Body.String(), key)
+					}
+				}
+				host, riskHost := "www.bigmodel.cn", "open.bigmodel.cn"
+				if plan == planquota.PlanGLMInternational {
+					host, riskHost = "api.z.ai", "api.z.ai"
+				}
+				assert.Equal(t, []string{host + "/api/biz/subscription/list", host + "/api/monitor/usage/quota/limit", riskHost + "/api/biz/labelCustomer/isRiskCustomer"}, requests)
+			})
+		}
+	}
+}
+
+func TestPlanHandlersRejectInvalidKeyBeforeQueryingUpstream(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	baseURL := planquota.PlanGLMDomestic
+	channel := model.Channel{
+		Type: constant.ChannelTypeZhipu_v4, BaseURL: &baseURL,
+		Key: "disabled-secret\nselected-secret\n \nauto-disabled-secret",
+		ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 99, MultiKeyStatusList: map[int]int{
+			0: common.ChannelStatusManuallyDisabled,
+			3: common.ChannelStatusAutoDisabled,
+		}},
+	}
+	require.NoError(t, db.Create(&channel).Error)
+	useCodingPlanTestTransport(t, func(*http.Request) (*http.Response, error) {
+		t.Error("invalid selection must not query upstream")
+		return nil, errors.New("unexpected upstream request")
+	})
+	for _, query := range []string{"", "?key=attacker-secret", "?key_index=", "?key_index=-1", "?key_index=99", "?key_index=abc", "?key_index=1&key_index=0", "?key_index=0", "?key_index=2", "?key_index=3"} {
+		for _, handler := range []gin.HandlerFunc{GetChannelPlanQuota, GetGLMRiskStatus} {
+			response := codingPlanHandlerResponse(handler, strconv.Itoa(channel.Id), query)
+			assert.Contains(t, response.Body.String(), `"success":false`)
+			for _, secret := range []string{"disabled-secret", "selected-secret", "attacker-secret"} {
+				assert.NotContains(t, response.Body.String(), secret)
+			}
+		}
+	}
+	channel.Key = ""
+	require.NoError(t, db.Model(&channel).Update("key", "").Error)
+	for _, handler := range []gin.HandlerFunc{GetChannelPlanQuota, GetGLMRiskStatus} {
+		response := codingPlanHandlerResponse(handler, strconv.Itoa(channel.Id), "?key_index=0")
+		assert.Contains(t, response.Body.String(), `"success":false`)
+	}
+}
+
+func TestPlanKeyOptionsAndQueriesHonorRedisDisabledStatus(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	baseURL := planquota.PlanGLMDomestic
+	channel := model.Channel{Type: constant.ChannelTypeZhipu_v4, BaseURL: &baseURL, Key: "first-secret-abcd\nsecond-secret-wxyz", ChannelInfo: model.ChannelInfo{IsMultiKey: true}}
+	require.NoError(t, db.Create(&channel).Error)
+	server := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	originalClient, originalEnabled := common.RDB, common.RedisEnabled
+	common.RDB, common.RedisEnabled = redisClient, true
+	t.Cleanup(func() {
+		common.RDB, common.RedisEnabled = originalClient, originalEnabled
+		require.NoError(t, redisClient.Close())
+	})
+	channel.ChannelInfo.MultiKeyStatusList = map[int]int{1: common.ChannelStatusAutoDisabled}
+	model.SyncMultiKeyStatusesToRedis(&channel)
+	useCodingPlanTestTransport(t, func(*http.Request) (*http.Response, error) {
+		t.Error("Redis disabled key must not query upstream")
+		return nil, errors.New("unexpected upstream request")
+	})
+	options := codingPlanHandlerResponse(GetCodingPlanKeyOptions, strconv.Itoa(channel.Id), "")
+	assert.JSONEq(t, `{"success":true,"message":"","data":{"keys":[{"index":0,"identifier":"****abcd","enabled":true},{"index":1,"identifier":"****wxyz","enabled":false}]}}`, options.Body.String())
+	for _, handler := range []gin.HandlerFunc{GetChannelPlanQuota, GetGLMRiskStatus} {
+		response := codingPlanHandlerResponse(handler, strconv.Itoa(channel.Id), "?key_index=1")
+		assert.JSONEq(t, `{"success":false,"message":"The selected CodingPlan key is disabled"}`, response.Body.String())
+	}
+}
+
+func TestPlanHandlersWrapSelectedKeyUpstreamFailuresWithoutSecrets(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	baseURL := planquota.PlanGLMDomestic
+	channel := model.Channel{Type: constant.ChannelTypeZhipu_v4, BaseURL: &baseURL, Key: "unused-secret\nselected-secret", ChannelInfo: model.ChannelInfo{IsMultiKey: true}}
+	require.NoError(t, db.Create(&channel).Error)
+	var logs bytes.Buffer
+	common.LogWriterMu.Lock()
+	originalWriter, originalErrorWriter := gin.DefaultWriter, gin.DefaultErrorWriter
+	gin.DefaultWriter, gin.DefaultErrorWriter = &logs, &logs
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultWriter, gin.DefaultErrorWriter = originalWriter, originalErrorWriter
+		common.LogWriterMu.Unlock()
+	})
+	for _, tc := range []struct {
+		name, body, message string
+		status              int
+		transportError      error
+	}{
+		{name: "401", status: http.StatusUnauthorized, body: "selected-secret", message: "CodingPlan credential is invalid or expired"},
+		{name: "403", status: http.StatusForbidden, body: "selected-secret", message: "CodingPlan credential is invalid or expired"},
+		{name: "429 is not risk", status: http.StatusTooManyRequests, body: `{"success":true,"data":true,"key":"selected-secret"}`},
+		{name: "empty", status: http.StatusOK},
+		{name: "malformed JSON", status: http.StatusOK, body: `{"selected-secret":invalid-json}`},
+		{name: "timeout", transportError: fmt.Errorf("selected-secret: %w", context.DeadlineExceeded)},
+		{name: "transport includes proxy credentials", transportError: errors.New("proxy http://user:selected-secret@localhost refused")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useCodingPlanTestTransport(t, func(request *http.Request) (*http.Response, error) {
+				assert.Equal(t, "selected-secret", request.Header.Get("Authorization"))
+				if tc.transportError != nil {
+					return nil, tc.transportError
+				}
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header)}, nil
+			})
+			for _, handler := range []gin.HandlerFunc{GetChannelPlanQuota, GetGLMRiskStatus} {
+				response := codingPlanHandlerResponse(handler, strconv.Itoa(channel.Id), "?key_index=1")
+				var decoded struct {
 					Success bool   `json:"success"`
 					Message string `json:"message"`
 				}
-				require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
-				assert.False(t, response.Success)
-				assert.NotContains(t, response.Message, "fixture-key")
+				require.NoError(t, common.Unmarshal(response.Body.Bytes(), &decoded))
+				assert.False(t, decoded.Success)
+				message := tc.message
+				if message == "" {
+					message = "CodingPlan upstream request failed"
+				}
+				assert.Equal(t, message, decoded.Message)
+				assert.NotContains(t, response.Body.String(), `"status":"risk"`)
+				for _, secret := range []string{"unused-secret", "selected-secret", "invalid-json"} {
+					assert.NotContains(t, response.Body.String(), secret)
+					assert.NotContains(t, logs.String(), secret)
+				}
 			}
+		})
+	}
+}
+
+func TestPlanQuotaDoesNotReturnKeysEchoedInSuccessFields(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	baseURL := planquota.PlanGLMDomestic
+	channel := model.Channel{Type: constant.ChannelTypeZhipu_v4, BaseURL: &baseURL, Key: "unused-secret\nselected-secret", ChannelInfo: model.ChannelInfo{IsMultiKey: true}}
+	require.NoError(t, db.Create(&channel).Error)
+	useCodingPlanTestTransport(t, func(request *http.Request) (*http.Response, error) {
+		body := `{"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"usage":100,"currentValue":25,"nextResetTime":"selected-secret"}]}}`
+		if request.URL.Path == "/api/biz/subscription/list" {
+			body = `{"data":[{"productName":"GLM selected-secret Max"}]}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+	response := codingPlanHandlerResponse(GetChannelPlanQuota, strconv.Itoa(channel.Id), "?key_index=1")
+	assert.Contains(t, response.Body.String(), `"success":true`)
+	assert.NotContains(t, response.Body.String(), "selected-secret")
+	assert.NotContains(t, response.Body.String(), "unused-secret")
+}
+
+func TestPlanGLMRiskDoesNotTreatMissingStateAsNormal(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	baseURL := planquota.PlanGLMDomestic
+	channel := model.Channel{Type: constant.ChannelTypeZhipu_v4, BaseURL: &baseURL, Key: "unused-secret\nselected-secret", ChannelInfo: model.ChannelInfo{IsMultiKey: true}}
+	require.NoError(t, db.Create(&channel).Error)
+	for _, tc := range []struct{ body, state string }{
+		{`{"success":true}`, "unknown"},
+		{`{"success":true,"data":null}`, "unknown"},
+		{`{"success":true,"data":false}`, "normal"},
+		{`{"success":true,"data":true}`, "risk"},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			useCodingPlanTestTransport(t, func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header)}, nil
+			})
+			response := codingPlanHandlerResponse(GetGLMRiskStatus, strconv.Itoa(channel.Id), "?key_index=1")
+			assert.Contains(t, response.Body.String(), `"success":true`)
+			assert.Contains(t, response.Body.String(), `"status":"`+tc.state+`"`)
+		})
+	}
+}
+
+func TestPlanSingleKeyKimiAndMiniMaxRemainCompatible(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	for _, tc := range []struct {
+		plan, host, path, body string
+		kind                   int
+	}{
+		{planquota.PlanKimi, "api.kimi.com", "/coding/v1/usages", `{"limits":[],"usage":{"limit":100,"remaining":75}}`, constant.ChannelTypeMoonshot},
+		{planquota.PlanMiniMax, "api.minimaxi.com", "/v1/api/openplatform/coding_plan/remains", `{"model_remains":[],"base_resp":{"status_code":0}}`, constant.ChannelTypeMiniMax},
+		{planquota.PlanMiniMaxInternational, "api.minimax.io", "/v1/api/openplatform/coding_plan/remains", `{"model_remains":[],"base_resp":{"status_code":0}}`, constant.ChannelTypeMiniMax},
+	} {
+		t.Run(tc.plan, func(t *testing.T) {
+			channel := model.Channel{Type: tc.kind, BaseURL: &tc.plan, Key: "single-secret"}
+			require.NoError(t, db.Create(&channel).Error)
+			requestCount := 0
+			useCodingPlanTestTransport(t, func(request *http.Request) (*http.Response, error) {
+				requestCount++
+				assert.Equal(t, tc.host, request.URL.Host)
+				assert.Equal(t, tc.path, request.URL.Path)
+				assert.Equal(t, "Bearer single-secret", request.Header.Get("Authorization"))
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header)}, nil
+			})
+			response := codingPlanHandlerResponse(GetChannelPlanQuota, strconv.Itoa(channel.Id), "")
+			assert.Contains(t, response.Body.String(), `"success":true`)
+			assert.Contains(t, response.Body.String(), `"plan_name":"`+tc.plan+`"`)
+			assert.NotContains(t, response.Body.String(), "single-secret")
+			assert.Equal(t, 1, requestCount)
 		})
 	}
 }

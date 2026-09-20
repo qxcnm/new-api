@@ -37,6 +37,7 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 }
 
 var channelPermissionRoutes = []permissionRoute{
+	{method: http.MethodGet, path: "/plan/keys/:id", permission: authz.ChannelRead, handler: controller.GetCodingPlanKeyOptions},
 	{method: http.MethodGet, path: "/plan/quota/:id", permission: authz.ChannelRead, handler: controller.GetChannelPlanQuota},
 	{method: http.MethodGet, path: "/plan/glm/risk/:id", permission: authz.ChannelRead, handler: controller.GetGLMRiskStatus},
 	{method: http.MethodGet, path: "/plan/glm/reset_cards/:id", permission: authz.ChannelRead, handler: controller.GetGLMResetCards},

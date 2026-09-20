@@ -30,8 +30,10 @@ func SetUpLogger(server *gin.Engine) {
 		}
 		path := param.Path
 		// OAuth callbacks carry one-time codes and state in the query string.
+		// CodingPlan accepts only key indices, but malformed requests may put a
+		// credential in that field or another query parameter.
 		// Redact the log value only; the handler still needs the original query.
-		if strings.HasPrefix(path, "/api/oauth/") || strings.HasPrefix(path, "/oauth/") {
+		if strings.HasPrefix(path, "/api/oauth/") || strings.HasPrefix(path, "/oauth/") || strings.HasPrefix(path, "/api/channel/plan/") {
 			path, _, _ = strings.Cut(path, "?")
 		}
 		return fmt.Sprintf("[GIN] %s | %s | %s | %3d | %13v | %15s | %7s %s\n",

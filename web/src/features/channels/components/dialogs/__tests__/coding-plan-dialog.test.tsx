@@ -8,27 +8,36 @@ the Free Software Foundation, either version 3 of the License, or
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
+  act,
   cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
 } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import i18next from 'i18next'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import zh from '@/i18n/locales/zh.json'
 
 import {
+  getCodingPlanKeys,
   getCodingPlanQuota,
   getGLMResetCards,
+  getGLMRiskStatus,
   resetGLMCard,
 } from '../../../api'
-import { channelSchema } from '../../../types'
+import {
+  channelSchema,
+  type Channel,
+  type CodingPlanQuotaResponse,
+} from '../../../types'
 import { useChannels } from '../../channels-provider'
 import { CodingPlanDialog } from '../coding-plan-dialog'
 
 vi.mock('../../../api', () => ({
+  getCodingPlanKeys: vi.fn(),
   getCodingPlanQuota: vi.fn(),
   getGLMResetCards: vi.fn(),
   getGLMRiskStatus: vi.fn(),
@@ -63,6 +72,8 @@ beforeEach(async () => {
     currentRow: row,
   } as ReturnType<typeof useChannels>)
   vi.mocked(getCodingPlanQuota).mockReset()
+  vi.mocked(getCodingPlanKeys).mockReset()
+  vi.mocked(getGLMRiskStatus).mockReset()
   vi.mocked(getGLMResetCards).mockReset()
   vi.mocked(resetGLMCard).mockReset()
 })
@@ -72,7 +83,7 @@ afterEach(() => {
   client.clear()
 })
 
-function renderDialog(mode: 'quota' | 'reset-cards') {
+function renderDialog(mode: 'quota' | 'risk' | 'reset-cards') {
   return render(
     <QueryClientProvider client={client}>
       <CodingPlanDialog mode={mode} open onOpenChange={vi.fn()} />
@@ -80,7 +91,335 @@ function renderDialog(mode: 'quota' | 'reset-cards') {
   )
 }
 
+function useMultiKeyGLM(planName = 'glm-coding-plan') {
+  vi.mocked(useChannels).mockReturnValue({
+    currentRow: {
+      ...row,
+      key: 'full-secret-abcd\nfull-secret-efgh\nfull-secret-ijkl',
+      channel_info: {
+        ...row.channel_info,
+        plan_name: planName,
+        is_multi_key: true,
+      },
+    },
+  } as ReturnType<typeof useChannels>)
+  vi.mocked(getCodingPlanKeys).mockResolvedValue({
+    success: true,
+    data: {
+      keys: [
+        { index: 0, identifier: '****abcd', enabled: false },
+        { index: 1, identifier: '****efgh', enabled: true },
+        { index: 2, identifier: '****ijkl', enabled: true },
+      ],
+    },
+  })
+}
+
+const quotaData: NonNullable<CodingPlanQuotaResponse['data']> = {
+  plan_name: 'glm-coding-plan',
+  quota_supported: true,
+  tiers: [{ name: 'five_hour', remaining: 80, limit: 100, used: 20 }],
+}
+
+const quotaResponse: CodingPlanQuotaResponse = {
+  success: true,
+  data: quotaData,
+}
+
+function pendingResponse<T>() {
+  let resolve!: (response: T) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 describe('CodingPlan dialog', () => {
+  test('multi-key GLM selects the first enabled key and only queries that key', async () => {
+    useMultiKeyGLM()
+    vi.mocked(getCodingPlanQuota).mockResolvedValue(quotaResponse)
+    renderDialog('quota')
+    await waitFor(() =>
+      expect(
+        screen.getByRole('combobox', { name: 'Query key' })
+      ).toHaveTextContent('Key 2 · ****efgh')
+    )
+    await waitFor(() =>
+      expect(getCodingPlanQuota).toHaveBeenCalledExactlyOnceWith(7, 1)
+    )
+    await userEvent.click(screen.getByRole('combobox', { name: 'Query key' }))
+    const disabledKey = await screen.findByRole('option', {
+      name: /Key 1 · \*\*\*\*abcd\s*\(Disabled\)/,
+    })
+    expect(disabledKey).toHaveAttribute('aria-disabled', 'true')
+    expect(
+      screen.getByRole('option', { name: 'Key 2 · ****efgh' })
+    ).toHaveAttribute('aria-selected', 'true')
+    expect(document.body).not.toHaveTextContent('full-secret-')
+  })
+
+  test.each(['glm-coding-plan', 'glm-coding-plan-international'])(
+    '%s switching keys queries risk for that index and refresh uses the selection',
+    async (planName) => {
+      useMultiKeyGLM(planName)
+      vi.mocked(getGLMRiskStatus)
+        .mockResolvedValueOnce({
+          success: true,
+          data: { plan_name: planName, status: 'risk' },
+        })
+        .mockResolvedValue({
+          success: true,
+          data: { plan_name: planName, status: 'normal' },
+        })
+      renderDialog('risk')
+      expect(await screen.findByText('Risk Control')).toBeInTheDocument()
+      await userEvent.click(screen.getByRole('combobox', { name: 'Query key' }))
+      await userEvent.click(
+        await screen.findByRole('option', { name: 'Key 3 · ****ijkl' })
+      )
+      expect(await screen.findByText('Normal')).toBeInTheDocument()
+      expect(getGLMRiskStatus).toHaveBeenNthCalledWith(1, 7, 1)
+      expect(getGLMRiskStatus).toHaveBeenNthCalledWith(2, 7, 2)
+      await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+      await waitFor(() =>
+        expect(getGLMRiskStatus).toHaveBeenNthCalledWith(3, 7, 2)
+      )
+      expect(getCodingPlanKeys).toHaveBeenCalledTimes(2)
+    }
+  )
+
+  test('changing keys while a request is pending clears old data and ignores its later result', async () => {
+    useMultiKeyGLM()
+    const pending = pendingResponse<CodingPlanQuotaResponse>()
+    vi.mocked(getCodingPlanQuota)
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValue({
+        success: true,
+        data: {
+          ...quotaData,
+          tiers: [{ name: 'five_hour', remaining: 25, limit: 100, used: 75 }],
+        },
+      })
+    renderDialog('quota')
+    await waitFor(() => expect(getCodingPlanQuota).toHaveBeenCalledWith(7, 1))
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled()
+    await userEvent.click(screen.getByRole('combobox', { name: 'Query key' }))
+    await userEvent.click(
+      await screen.findByRole('option', { name: 'Key 3 · ****ijkl' })
+    )
+    expect(await screen.findByText('Remaining: 25 / 100')).toBeInTheDocument()
+    await act(async () => pending.resolve(quotaResponse))
+    expect(screen.queryByText('Remaining: 80 / 100')).not.toBeInTheDocument()
+    expect(screen.getByText('Remaining: 25 / 100')).toBeInTheDocument()
+  })
+
+  test('metadata loading and failures prevent upstream queries and refresh retries discovery', async () => {
+    useMultiKeyGLM()
+    const pending =
+      pendingResponse<Awaited<ReturnType<typeof getCodingPlanKeys>>>()
+    vi.mocked(getCodingPlanKeys).mockReturnValueOnce(pending.promise)
+    vi.mocked(getCodingPlanQuota).mockResolvedValue(quotaResponse)
+    renderDialog('quota')
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Query key' })).toBeDisabled()
+    expect(getCodingPlanQuota).not.toHaveBeenCalled()
+    await act(async () =>
+      pending.reject(new Error('Failed to load channel keys'))
+    )
+    expect(
+      await screen.findByText('Failed to load channel keys')
+    ).toBeInTheDocument()
+    expect(getCodingPlanQuota).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByText('Remaining: 80 / 100')).toBeInTheDocument()
+  })
+
+  test.each([
+    { keys: [] },
+    { keys: [{ index: 0, identifier: '****', enabled: false }] },
+  ])(
+    'a key list without an enabled key shows an empty state and makes no upstream request',
+    async ({ keys }) => {
+      useMultiKeyGLM()
+      vi.mocked(getCodingPlanKeys).mockResolvedValue({
+        success: true,
+        data: { keys },
+      })
+      renderDialog('risk')
+      expect(
+        await screen.findByText('No enabled keys available')
+      ).toBeInTheDocument()
+      expect(getGLMRiskStatus).not.toHaveBeenCalled()
+      await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+      await waitFor(() => expect(getCodingPlanKeys).toHaveBeenCalledTimes(2))
+      expect(getGLMRiskStatus).not.toHaveBeenCalled()
+    }
+  )
+
+  test('a rejected selected key shows an inline error and another key can still be queried', async () => {
+    useMultiKeyGLM()
+    vi.mocked(getCodingPlanQuota)
+      .mockResolvedValueOnce({
+        success: false,
+        message: 'The selected CodingPlan key is disabled',
+      })
+      .mockResolvedValue(quotaResponse)
+    renderDialog('quota')
+    expect(
+      await screen.findByText('The selected CodingPlan key is disabled')
+    ).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('combobox', { name: 'Query key' }))
+    await userEvent.click(
+      await screen.findByRole('option', { name: 'Key 3 · ****ijkl' })
+    )
+    expect(await screen.findByText('Remaining: 80 / 100')).toBeInTheDocument()
+    expect(getCodingPlanQuota).toHaveBeenLastCalledWith(7, 2)
+    expect(document.body).not.toHaveTextContent('full-secret-')
+  })
+
+  test('refresh updates key availability without silently selecting a different key', async () => {
+    useMultiKeyGLM()
+    vi.mocked(getCodingPlanQuota).mockResolvedValue(quotaResponse)
+    renderDialog('quota')
+    expect(await screen.findByText('Remaining: 80 / 100')).toBeInTheDocument()
+    vi.mocked(getCodingPlanKeys).mockResolvedValue({
+      success: true,
+      data: {
+        keys: [
+          { index: 1, identifier: '****efgh', enabled: false },
+          { index: 2, identifier: '****ijkl', enabled: true },
+        ],
+      },
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(
+      await screen.findByText('The selected CodingPlan key is disabled')
+    ).toBeInTheDocument()
+    expect(getCodingPlanQuota).toHaveBeenCalledExactlyOnceWith(7, 1)
+    const selector = screen.getByRole('combobox', { name: 'Query key' })
+    selector.focus()
+    await userEvent.keyboard('{ArrowDown}{ArrowDown}{Enter}')
+    expect(await screen.findByText('Remaining: 80 / 100')).toBeInTheDocument()
+    expect(getCodingPlanQuota).toHaveBeenLastCalledWith(7, 2)
+  })
+
+  test('a multi-key quota response without tiers shows the shared empty state', async () => {
+    useMultiKeyGLM()
+    vi.mocked(getCodingPlanQuota).mockResolvedValue({
+      success: true,
+      data: { ...quotaData, tiers: [] },
+    })
+    renderDialog('quota')
+    expect(await screen.findByText('No Data')).toBeInTheDocument()
+    expect(
+      screen.getByRole('combobox', { name: 'Query key' })
+    ).toHaveTextContent('Key 2 · ****efgh')
+  })
+
+  test('Chinese key labels and selection errors use the same locale as the dialog', async () => {
+    useMultiKeyGLM()
+    i18next.addResourceBundle('zh', 'translation', zh.translation)
+    await i18next.changeLanguage('zh')
+    vi.mocked(getCodingPlanQuota).mockResolvedValue({
+      success: false,
+      message: 'CodingPlan key selection is invalid',
+    })
+    renderDialog('quota')
+    expect(
+      await screen.findByText(
+        zh.translation['CodingPlan key selection is invalid']
+      )
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('combobox', { name: zh.translation['Query key'] })
+    ).toHaveTextContent('密钥 2 · ****efgh')
+  })
+
+  test('multi-key reset cards retain their existing request and never show a key selector', async () => {
+    useMultiKeyGLM()
+    vi.mocked(getGLMResetCards).mockResolvedValue({
+      success: false,
+      message: 'CodingPlan queries do not support multi-key channels',
+    })
+    renderDialog('reset-cards')
+    expect(
+      await screen.findByText(
+        'CodingPlan queries do not support multi-key channels'
+      )
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+    expect(getCodingPlanKeys).not.toHaveBeenCalled()
+    expect(getGLMResetCards).toHaveBeenCalledExactlyOnceWith(7)
+  })
+
+  test.each([
+    ['glm-coding-plan', false, true],
+    ['kimi-coding-plan', true, true],
+    ['minimax-coding-plan', true, true],
+    ['glm-coding-plan', true, false],
+  ])(
+    '%s with multi-key=%s and plan=%s keeps the original request and has no selector',
+    async (planName, multiKey, isPlan) => {
+      vi.mocked(useChannels).mockReturnValue({
+        currentRow: {
+          ...row,
+          channel_info: {
+            ...row.channel_info,
+            plan_name: planName,
+            is_plan: isPlan,
+            is_multi_key: multiKey,
+          },
+        },
+      } as ReturnType<typeof useChannels>)
+      vi.mocked(getCodingPlanQuota).mockResolvedValue(quotaResponse)
+      renderDialog('quota')
+      expect(await screen.findByText('Remaining: 80 / 100')).toBeInTheDocument()
+      expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+      expect(getCodingPlanKeys).not.toHaveBeenCalled()
+      expect(getCodingPlanQuota).toHaveBeenCalledExactlyOnceWith(7)
+    }
+  )
+
+  test('reopening or changing the channel reloads metadata and ignores earlier responses', async () => {
+    useMultiKeyGLM()
+    const firstKeys =
+      pendingResponse<Awaited<ReturnType<typeof getCodingPlanKeys>>>()
+    vi.mocked(getCodingPlanKeys).mockReturnValueOnce(firstKeys.promise)
+    vi.mocked(getCodingPlanQuota).mockResolvedValue(quotaResponse)
+    const view = renderDialog('quota')
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <CodingPlanDialog mode='quota' open={false} onOpenChange={vi.fn()} />
+      </QueryClientProvider>
+    )
+    const currentRow = vi.mocked(useChannels).getMockImplementation()?.()
+      .currentRow as Channel
+    vi.mocked(useChannels).mockReturnValue({
+      currentRow: { ...currentRow, id: 8 },
+    } as ReturnType<typeof useChannels>)
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <CodingPlanDialog mode='quota' open onOpenChange={vi.fn()} />
+      </QueryClientProvider>
+    )
+    expect(await screen.findByText('Remaining: 80 / 100')).toBeInTheDocument()
+    expect(getCodingPlanKeys).toHaveBeenNthCalledWith(2, 8)
+    expect(getCodingPlanQuota).toHaveBeenCalledExactlyOnceWith(8, 1)
+    await act(async () =>
+      firstKeys.resolve({
+        success: true,
+        data: { keys: [{ index: 9, identifier: '****late', enabled: true }] },
+      })
+    )
+    expect(
+      screen.getByRole('combobox', { name: 'Query key' })
+    ).toHaveTextContent('Key 2 · ****efgh')
+    expect(getCodingPlanQuota).toHaveBeenCalledTimes(1)
+  })
+
   test.each(['glm-coding-plan', 'kimi-coding-plan', 'minimax-coding-plan'])(
     '%s displays reset timestamps in local time and labels quota periods',
     async (planName) => {

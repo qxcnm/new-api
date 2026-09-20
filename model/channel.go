@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -208,6 +209,18 @@ func (channel *Channel) GetKeys() []string {
 	// Otherwise, fall back to splitting by newline
 	keys := strings.Split(strings.Trim(channel.Key, "\n"), "\n")
 	return keys
+}
+
+// GetMultiKeyStatuses returns a status snapshot using the same Redis precedence
+// as relay key selection. An absent index is enabled. It does not advance polling.
+func (channel *Channel) GetMultiKeyStatuses() map[int]int {
+	lock := GetChannelPollingLock(channel.Id)
+	lock.Lock()
+	defer lock.Unlock()
+	statuses := make(map[int]int, len(channel.ChannelInfo.MultiKeyStatusList))
+	maps.Copy(statuses, channel.ChannelInfo.MultiKeyStatusList)
+	maps.Copy(statuses, getRedisMultiKeyStatus(channel.Id))
+	return statuses
 }
 
 func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {

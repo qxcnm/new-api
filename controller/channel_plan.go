@@ -14,7 +14,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func getPlanChannel(c *gin.Context) (*model.Channel, string, bool) {
+var newPlanQuotaClient = planquota.NewClient
+
+var (
+	errPlanKeyRequired = errors.New("CodingPlan key selection is required")
+	errPlanKeyInvalid  = errors.New("CodingPlan key selection is invalid")
+	errPlanKeyDisabled = errors.New("The selected CodingPlan key is disabled")
+	errPlanKeyMissing  = errors.New("The selected CodingPlan key is missing")
+)
+
+func getPlanChannel(c *gin.Context, allowGLMMultiKey bool) (*model.Channel, string, bool) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id <= 0 {
 		common.ApiErrorMsg(c, "invalid channel id")
@@ -25,28 +34,87 @@ func getPlanChannel(c *gin.Context) (*model.Channel, string, bool) {
 		common.ApiErrorMsg(c, "channel not found")
 		return nil, "", false
 	}
-	if channel.ChannelInfo.IsMultiKey {
-		common.ApiErrorMsg(c, "CodingPlan queries do not support multi-key channels")
-		return nil, "", false
-	}
 	channel.DetectPlan()
 	if !channel.ChannelInfo.IsPlan {
 		common.ApiErrorMsg(c, "channel is not a supported CodingPlan channel")
 		return nil, "", false
 	}
+	if channel.ChannelInfo.IsMultiKey && (!allowGLMMultiKey || (channel.ChannelInfo.PlanName != planquota.PlanGLMDomestic && channel.ChannelInfo.PlanName != planquota.PlanGLMInternational)) {
+		common.ApiErrorMsg(c, "CodingPlan queries do not support multi-key channels")
+		return nil, "", false
+	}
 	return channel, channel.ChannelInfo.PlanName, true
 }
 
-func planKey(channel *model.Channel) (string, error) {
-	key, _, apiErr := channel.GetNextEnabledKey()
-	if apiErr != nil {
-		return "", apiErr
+func planKey(c *gin.Context, channel *model.Channel, allowMultiKey bool) (string, error) {
+	values, hasIndex := c.Request.URL.Query()["key_index"]
+	index := 0
+	if hasIndex {
+		if len(values) != 1 || values[0] == "" {
+			return "", errPlanKeyInvalid
+		}
+		var err error
+		index, err = strconv.Atoi(values[0])
+		if err != nil || index < 0 {
+			return "", errPlanKeyInvalid
+		}
 	}
-	key = strings.TrimSpace(key)
+	key := strings.TrimSpace(channel.Key)
+	if channel.ChannelInfo.IsMultiKey {
+		if !allowMultiKey {
+			return "", errPlanKeyInvalid
+		}
+		if !hasIndex {
+			return "", errPlanKeyRequired
+		}
+		keys := channel.GetKeys()
+		if index >= len(keys) {
+			return "", errPlanKeyInvalid
+		}
+		if status, exists := channel.GetMultiKeyStatuses()[index]; exists && status != common.ChannelStatusEnabled {
+			return "", errPlanKeyDisabled
+		}
+		key = strings.TrimSpace(keys[index])
+	} else if index != 0 {
+		return "", errPlanKeyInvalid
+	}
 	if key == "" {
-		return "", errors.New("CodingPlan channel key is empty")
+		return "", errPlanKeyMissing
 	}
 	return key, nil
+}
+
+// GetCodingPlanKeyOptions exposes only identifiers and availability. The general
+// multi-key management endpoint has different permissions and preview semantics.
+func GetCodingPlanKeyOptions(c *gin.Context) {
+	channel, _, ok := getPlanChannel(c, true)
+	if !ok {
+		return
+	}
+	if !channel.ChannelInfo.IsMultiKey {
+		common.ApiErrorMsg(c, "CodingPlan key selection is invalid")
+		return
+	}
+	type keyOption struct {
+		Index      int    `json:"index"`
+		Identifier string `json:"identifier"`
+		Enabled    bool   `json:"enabled"`
+	}
+	keys := channel.GetKeys()
+	statuses := channel.GetMultiKeyStatuses()
+	options := make([]keyOption, 0, len(keys))
+	for index, key := range keys {
+		key = strings.TrimSpace(key)
+		identifier := "****"
+		runes := []rune(key)
+		if len(runes) > 4 {
+			identifier += string(runes[len(runes)-4:])
+		}
+		status, exists := statuses[index]
+		options = append(options, keyOption{Index: index, Identifier: identifier, Enabled: key != "" && (!exists || status == common.ChannelStatusEnabled)})
+	}
+	c.Header("Cache-Control", "no-store")
+	common.ApiSuccess(c, gin.H{"keys": options})
 }
 
 func planRequestContext(c *gin.Context) (context.Context, context.CancelFunc) {
@@ -54,6 +122,12 @@ func planRequestContext(c *gin.Context) (context.Context, context.CancelFunc) {
 }
 
 func writePlanError(c *gin.Context, err error) {
+	for _, selectionError := range []error{errPlanKeyRequired, errPlanKeyInvalid, errPlanKeyDisabled, errPlanKeyMissing} {
+		if errors.Is(err, selectionError) {
+			common.ApiErrorMsg(c, selectionError.Error())
+			return
+		}
+	}
 	if errors.Is(err, planquota.ErrCredential) {
 		common.ApiErrorMsg(c, "CodingPlan credential is invalid or expired")
 		return
@@ -65,7 +139,7 @@ func writePlanError(c *gin.Context, err error) {
 }
 
 func GetChannelPlanQuota(c *gin.Context) {
-	channel, planName, ok := getPlanChannel(c)
+	channel, planName, ok := getPlanChannel(c, true)
 	if !ok {
 		return
 	}
@@ -73,12 +147,12 @@ func GetChannelPlanQuota(c *gin.Context) {
 		common.ApiSuccess(c, gin.H{"plan_name": planName, "quota_supported": false, "tiers": []planquota.Tier{}})
 		return
 	}
-	key, err := planKey(channel)
+	key, err := planKey(c, channel, true)
 	if err != nil {
 		writePlanError(c, err)
 		return
 	}
-	client, err := planquota.NewClient(channel.GetSetting().Proxy)
+	client, err := newPlanQuotaClient(channel.GetSetting().Proxy)
 	if err != nil {
 		writePlanError(c, err)
 		return
@@ -90,11 +164,21 @@ func GetChannelPlanQuota(c *gin.Context) {
 		writePlanError(c, err)
 		return
 	}
+	// Only these display fields can contain arbitrary upstream text. Suppress
+	// credential echoes even in an otherwise successful upstream response.
+	if strings.Contains(quota.ProductName, key) {
+		quota.ProductName = ""
+	}
+	for i := range quota.Tiers {
+		if strings.Contains(quota.Tiers[i].ResetsAt, key) {
+			quota.Tiers[i].ResetsAt = ""
+		}
+	}
 	common.ApiSuccess(c, gin.H{"plan_name": quota.PlanName, "quota_supported": true, "credential": quota.Credential, "product_name": quota.ProductName, "plan_version": quota.PlanVersion, "tiers": quota.Tiers})
 }
 
 func GetGLMRiskStatus(c *gin.Context) {
-	channel, planName, ok := getPlanChannel(c)
+	channel, planName, ok := getPlanChannel(c, true)
 	if !ok {
 		return
 	}
@@ -102,12 +186,12 @@ func GetGLMRiskStatus(c *gin.Context) {
 		common.ApiErrorMsg(c, "GLM risk status is only available for GLM CodingPlan channels")
 		return
 	}
-	key, err := planKey(channel)
+	key, err := planKey(c, channel, true)
 	if err != nil {
 		writePlanError(c, err)
 		return
 	}
-	client, err := planquota.NewClient(channel.GetSetting().Proxy)
+	client, err := newPlanQuotaClient(channel.GetSetting().Proxy)
 	if err != nil {
 		writePlanError(c, err)
 		return
@@ -123,7 +207,7 @@ func GetGLMRiskStatus(c *gin.Context) {
 }
 
 func GetGLMResetCards(c *gin.Context) {
-	channel, planName, ok := getPlanChannel(c)
+	channel, planName, ok := getPlanChannel(c, false)
 	if !ok {
 		return
 	}
@@ -131,7 +215,7 @@ func GetGLMResetCards(c *gin.Context) {
 		common.ApiErrorMsg(c, "Reset cards are only available for GLM CodingPlan channels")
 		return
 	}
-	key, err := planKey(channel)
+	key, err := planKey(c, channel, false)
 	if err != nil {
 		writePlanError(c, err)
 		return
@@ -157,7 +241,7 @@ type useGLMResetCardRequest struct {
 }
 
 func UseGLMResetCard(c *gin.Context) {
-	channel, planName, ok := getPlanChannel(c)
+	channel, planName, ok := getPlanChannel(c, false)
 	if !ok {
 		return
 	}
@@ -170,7 +254,7 @@ func UseGLMResetCard(c *gin.Context) {
 		common.ApiErrorMsg(c, "invalid reset card request")
 		return
 	}
-	key, err := planKey(channel)
+	key, err := planKey(c, channel, false)
 	if err != nil {
 		writePlanError(c, err)
 		return

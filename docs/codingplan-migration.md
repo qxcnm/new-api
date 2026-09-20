@@ -56,7 +56,7 @@ PlanName string `json:"plan_name"`
 
 字段只存入现有 `channel_info` JSON，不新增表和列。新增、修改、复制渠道时由后端根据渠道类型和特殊地址白名单计算，不能信任前端直接传入。旧渠道没有这两个字段时，应通过兼容检测补齐，不得导致普通渠道请求失败。
 
-多 Key 渠道的计划查询暂不支持，查询凭证只取当前渠道的主 Key；响应、日志和错误信息不得泄露 Key、Token、Cookie 或完整上游响应中的凭证字段。
+GLM 国内及国际 CodingPlan 多 Key 渠道的额度和风控查询支持通过 `key_index` 指定一个 Key；索引为现有渠道 Key 列表中的零基索引，必须由服务端根据实际列表及禁用状态校验。单 Key 查询不要求该参数。其他厂商多 Key 查询及多 Key 重置卡操作仍不支持。响应、日志和错误信息不得泄露 Key、Token、Cookie 或完整上游响应中的凭证字段。
 
 ## 5. 转发和模型地址
 
@@ -100,6 +100,7 @@ PlanName string `json:"plan_name"`
 
 ```text
 GET /api/channel/plan/quota/:id
+GET /api/channel/plan/quota/:id?key_index=1
 ```
 
 行为：
@@ -110,14 +111,20 @@ GET /api/channel/plan/quota/:id
 - Kimi、MiniMax 返回各自可用的窗口、剩余量和重置时间；
 - 未实现查询的计划返回 `quota_supported=false`，不伪造额度；
 - 上游错误只返回可展示的错误分类，详细错误写服务端日志且脱敏。
+- GLM 多 Key 渠道必须提供一个有效的 `key_index`，仅使用该 Key 完成现有订阅与额度两次请求，不轮询其他 Key；普通单 Key 调用保持无参数兼容。
 
 ### 6.2 GLM 风控
 
 ```text
 GET /api/channel/plan/glm/risk/:id
+GET /api/channel/plan/glm/risk/:id?key_index=1
 ```
 
 只对 GLM CodingPlan 开放。返回统一的状态枚举和可展示说明，例如正常、需关注、已风控、查询失败；原始风控响应不直接透传到前端。
+
+多 Key 选择规则与额度查询一致，仍请求 `/api/biz/labelCustomer/isRiskCustomer`，不通过 429 推断风控。`data` 缺失或为 null 时返回 `unknown`。
+
+安全选项接口 `GET /api/channel/plan/keys/:id` 沿用管理员渠道 `ChannelRead` 权限，仅对 GLM 多 Key 计划渠道开放，返回 `data.keys: [{index, identifier, enabled}]`。`identifier` 只包含 `****` 及 Key 后四位，长度不超过四个字符的 Key 完全隐藏；空 Key 标记为不可用。接口读取现有渠道和多 Key 状态，不请求上游，不返回完整 Key、禁用原因或密钥配置。
 
 ### 6.3 GLM 重置卡
 
@@ -299,3 +306,28 @@ GLM 渠道表单新增“接入类型”：普通 API、CodingPlan 国内版、C
 Moonshot（渠道类型 25）和 MiniMax（渠道类型 35）现复用 GLM 使用的现有渠道表单选择器。Moonshot 选择“CodingPlan”后自动保存 `kimi-coding-plan`；MiniMax 提供国内版和国际版，分别保存 `minimax-coding-plan` 和 `minimax-coding-plan-international`。这些值继续写入原有 `base_url` 字段，不新增数据库字段或套餐表。
 
 选择计划后隐藏手工 Base URL，切回标准 API 会恢复本次编辑保存的自定义地址；模型获取和保存沿用原有渠道接口。新增前端交互和别名解析测试均通过。普通火山渠道的模型列表、Chat、Bot、Responses、Embedding、Images 地址和鉴权回归测试继续通过；本次未使用 Kimi 或 MiniMax 真实凭证进行上游请求验证。
+
+### GLM 多 Key 指定查询（2026-09-21）
+
+国内和国际 GLM CodingPlan 的现有额度、风控弹窗现支持选择一个 Key。选项来自只读脱敏接口，默认选择第一个可用 Key；界面只显示序号和脱敏尾号，不读取渠道完整密钥字段。切换会清空旧结果并查询所选 Key，旧请求在切换、关闭或更换渠道后返回时不会覆盖当前结果。刷新重新读取 Key 可用状态并保持当前索引；该 Key 已禁用或不存在时显示错误，不自动改用另一个 Key。无可用 Key 时显示空态，不请求上游。
+
+实现继续使用原有渠道模型、`GetKeys()` 和多 Key 状态；Redis 状态按现有转发逻辑优先于渠道状态。服务端按实际 Key 列表校验 `key_index`，不信任 `MultiKeySize` 或客户端传入的完整密钥，不推进轮询位置。额度沿用所选 Key 的订阅与额度两次请求，风控仅调用原风控 endpoint 一次。单 Key 请求无需增加参数；Kimi、MiniMax、普通渠道以及重置卡行为保持原范围。本次未新增表、字段、迁移、ORM 查询或依赖。
+
+前端复用现有 `Dialog`、`Select`、`LoadingState`、`ErrorState` 和 `EmptyState`，没有新增页面或通用组件。新增十条文案通过项目 `add-missing-keys.mjs` 流程写入 en、zh、zh-TW、fr、ja、ru、vi，随后执行 `bun run i18n:sync`；临时脚本已删除。
+
+安全边界：所有接口沿用管理员认证和 `ChannelRead` 权限；无效、重复、越界、禁用或空 Key 选择在请求上游前失败。访问日志隐藏 CodingPlan 查询字符串，错误消息不包含密钥、代理凭证或上游正文，额度显示字段中的所选密钥回显也会移除。401/403 使用现有凭证错误包装，429、超时、空响应及 malformed JSON 均作为安全失败处理；风控缺失状态显示未知，不以限流推断风控。已按 OWASP [Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)、[Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html) 和 ASVS **5.0.0** 的适用控制检查服务端授权、敏感数据及日志错误保护（8.2.1–8.2.3、8.3.1、14.2.1、14.2.6、16.2.5、16.5.1、16.5.3）；没有修改登录或会话机制，也不据此宣称整个应用符合 ASVS。
+
+本次后端验证通过 controller、router、middleware、model、service/planquota 的受影响定向测试及额度客户端完整测试。测试使用现有 SQLite fixture、miniredis 和受控 HTTP transport，覆盖国内/国际 GLM 指定 Key、实际索引边界、禁用状态、脱敏选项和日志、成功响应密钥回显、权限、错误矩阵及单 Key/Kimi/MiniMax/普通渠道回归。未修改数据库行为，因此没有重跑此前迁移的三数据库矩阵；本次 SQLite fixture 不构成新的三数据库实测证据。
+
+前端 35 项测试通过（弹窗 26、API 3、计划工具 6），覆盖选择器显示范围、脱敏、首个可用 Key、切换与刷新、键盘选择、禁用状态变化、空态、错误和过期请求结果隔离。`bun run typecheck`、修改文件 oxlint/oxfmt、`bun run build`、`bun run i18n:sync` 和 `git diff --check` 均通过。七语言缺失与多余键均为 0，新增十条文案及插值完整；日语/俄语报告只保留原有品牌词 `CodingPlan`、`Zhipu GLM` 的英文提示。
+
+受影响后端验证命令：
+
+```sh
+go test ./controller ./router ./middleware ./model ./service/planquota -run 'Test(Plan|GetCodingPlan|CodingPlan|Channel|SequentialKeySelectionUsesFirstAvailableRedisStatus|FetchOrdinaryOpenAIModelsKeepsExistingEmptyDataBehavior|QuotaClient|FetchKimiQuota|GLMRisk|FetchMiniMaxQuota|FetchGLMQuota|FetchQuota|ResetCards|MiniMaxReset|GLMQuota|SetUpLogger|RedactTaskArtifactAccess)' -count=1
+go test ./service/planquota -count=1
+```
+
+修改文件分组：后端 `controller/channel_plan.go`、`model/channel.go`、`service/planquota/client.go`、`router/channel-router.go`、`middleware/logger.go` 及三个现有测试文件；前端渠道 `api.ts`、`types.ts`、现有 CodingPlan Dialog、Dialog/API 测试、`static-keys.ts` 与七语言 locale；文档仅更新本文件。
+
+验证边界：本次新增的多 Key 选择流程没有使用真实 GLM 凭证请求上游，也未进行运行中服务的浏览器验收。此前章节的真实单 Key 上游验收属于历史记录，不替代本次多 Key 实测；真实账号差异、上游权限和限流仍需在部署环境验证。本次不部署或重启现有服务。

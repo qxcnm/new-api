@@ -97,7 +97,7 @@ func (c *Client) request(ctx context.Context, method, endpoint, path, key string
 	}
 	req, err := http.NewRequestWithContext(ctx, method, base+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, errors.New("invalid coding plan request")
 	}
 	for name, values := range headers {
 		for _, value := range values {
@@ -109,12 +109,18 @@ func (c *Client) request(ctx context.Context, method, endpoint, path, key string
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, 0, err
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, 0, context.DeadlineExceeded
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, 0, context.Canceled
+		}
+		return nil, 0, errors.New("coding plan upstream transport failed")
 	}
 	defer resp.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return nil, resp.StatusCode, err
+		return nil, resp.StatusCode, errors.New("coding plan upstream response could not be read")
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, resp.StatusCode, ErrCredential
@@ -293,16 +299,16 @@ func (c *Client) FetchGLMRisk(ctx context.Context, planName, key string) (string
 		return "", ErrCredential
 	}
 	var response struct {
-		Data    bool `json:"data"`
-		Success bool `json:"success"`
+		Data    *bool `json:"data"`
+		Success bool  `json:"success"`
 	}
 	if err := common.Unmarshal(body, &response); err != nil {
 		return "", errors.New("invalid GLM risk response")
 	}
-	if !response.Success && !response.Data {
+	if response.Data == nil || (!response.Success && !*response.Data) {
 		return "unknown", nil
 	}
-	if response.Data {
+	if *response.Data {
 		return "risk", nil
 	}
 	return "normal", nil

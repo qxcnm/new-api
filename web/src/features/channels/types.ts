@@ -219,6 +219,18 @@ export interface CodingPlanTier {
   status?: string
 }
 
+export interface CodingPlanKey {
+  index: number
+  identifier: string
+  enabled: boolean
+}
+
+export interface CodingPlanKeysResponse {
+  success: boolean
+  message?: string
+  data?: { keys: CodingPlanKey[] }
+}
+
 export interface CodingPlanQuotaResponse {
   success: boolean
   message?: string

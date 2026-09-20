@@ -8,15 +8,34 @@ the Free Software Foundation, either version 3 of the License, or
 */
 import { useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, Loader2, RefreshCw } from 'lucide-react'
-import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Dialog } from '@/components/dialog'
+import { EmptyState } from '@/components/empty-state'
+import { ErrorState } from '@/components/error-state'
+import { LoadingState } from '@/components/loading-state'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { formatDateTimeStr } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import {
@@ -25,6 +44,7 @@ import {
 } from '@/lib/server-error-message'
 
 import {
+  getCodingPlanKeys,
   getCodingPlanQuota,
   getGLMResetCards,
   getGLMRiskStatus,
@@ -32,6 +52,7 @@ import {
 } from '../../api'
 import { channelsQueryKeys } from '../../lib'
 import type {
+  CodingPlanKey,
   CodingPlanQuotaResponse,
   CodingPlanResetCard,
   CodingPlanResetCardsResponse,
@@ -67,6 +88,20 @@ export function CodingPlanDialog({
   const { t } = useTranslation()
   const { currentRow } = useChannels()
   const queryClient = useQueryClient()
+  const channelId = currentRow?.id
+  const needsKeySelection = Boolean(
+    currentRow?.channel_info.is_plan &&
+    currentRow.type === 26 &&
+    currentRow.channel_info.is_multi_key &&
+    ['glm-coding-plan', 'glm-coding-plan-international'].includes(
+      currentRow.channel_info.plan_name
+    ) &&
+    mode !== 'reset-cards'
+  )
+  const keySelectId = useId()
+  const requestId = useRef({ value: 0 })
+  const [keys, setKeys] = useState<CodingPlanKey[]>([])
+  const [selectedKeyIndex, setSelectedKeyIndex] = useState<number>()
   const [loading, setLoading] = useState(false)
   const [quota, setQuota] = useState<CodingPlanQuotaResponse['data']>()
   const [risk, setRisk] = useState<CodingPlanRiskResponse['data']>()
@@ -78,55 +113,103 @@ export function CodingPlanDialog({
   )
   const [resetting, setResetting] = useState(false)
 
-  const loadData = useCallback(async () => {
-    if (!currentRow) return
-    setLoading(true)
-    setErrorMessage(null)
-    try {
-      if (mode === 'quota') {
-        const response = await getCodingPlanQuota(currentRow.id)
-        if (!response.success) {
-          throw createServerError(
-            response,
-            t('Failed to fetch coding plan quota')
-          )
+  const loadData = useCallback(
+    async (keyIndex?: number, reloadKeys = false) => {
+      if (channelId === undefined || !open) return
+      const activeRequest = ++requestId.current.value
+      setLoading(true)
+      setErrorMessage(null)
+      setQuota(undefined)
+      setRisk(undefined)
+      setResetCards(undefined)
+      try {
+        if (needsKeySelection && (keyIndex === undefined || reloadKeys)) {
+          const response = await getCodingPlanKeys(channelId)
+          if (activeRequest !== requestId.current.value) return
+          if (!response.success || !response.data) {
+            throw createServerError(response, t('Failed to load channel keys'))
+          }
+          setKeys(response.data.keys)
+          if (keyIndex !== undefined) {
+            const selectedKey = response.data.keys.find(
+              (key) => key.index === keyIndex
+            )
+            if (!selectedKey) {
+              throw createServerError({
+                message: 'The selected CodingPlan key is missing',
+              })
+            }
+            if (!selectedKey.enabled) {
+              throw createServerError({
+                message: 'The selected CodingPlan key is disabled',
+              })
+            }
+          } else {
+            keyIndex = response.data.keys.find((key) => key.enabled)?.index
+          }
+          setSelectedKeyIndex(keyIndex)
+          if (keyIndex === undefined) return
         }
-        setQuota(response.data)
-      } else if (mode === 'risk') {
-        const response = await getGLMRiskStatus(currentRow.id)
-        if (!response.success) {
-          throw createServerError(
-            response,
-            t('Failed to fetch risk control status')
-          )
+        if (mode === 'quota') {
+          const response = needsKeySelection
+            ? await getCodingPlanQuota(channelId, keyIndex)
+            : await getCodingPlanQuota(channelId)
+          if (activeRequest !== requestId.current.value) return
+          if (!response.success || (needsKeySelection && !response.data)) {
+            throw createServerError(
+              response,
+              t('Failed to fetch coding plan quota')
+            )
+          }
+          setQuota(response.data)
+        } else if (mode === 'risk') {
+          const response = needsKeySelection
+            ? await getGLMRiskStatus(channelId, keyIndex)
+            : await getGLMRiskStatus(channelId)
+          if (activeRequest !== requestId.current.value) return
+          if (!response.success || (needsKeySelection && !response.data)) {
+            throw createServerError(
+              response,
+              t('Failed to fetch risk control status')
+            )
+          }
+          setRisk(response.data)
+        } else {
+          const response = await getGLMResetCards(channelId)
+          if (activeRequest !== requestId.current.value) return
+          if (!response.success) {
+            throw createServerError(response, t('Failed to fetch reset cards'))
+          }
+          setResetCards(response.data)
         }
-        setRisk(response.data)
-      } else {
-        const response = await getGLMResetCards(currentRow.id)
-        if (!response.success) {
-          throw createServerError(response, t('Failed to fetch reset cards'))
-        }
-        setResetCards(response.data)
+      } catch (error: unknown) {
+        if (activeRequest !== requestId.current.value) return
+        const message = t(
+          getServerErrorMessage(error, t('Failed to load coding plan data'))
+        )
+        setErrorMessage(message)
+        handleServerError(error, message, { title: message })
+      } finally {
+        if (activeRequest === requestId.current.value) setLoading(false)
       }
-    } catch (error: unknown) {
-      const message = t(
-        getServerErrorMessage(error, t('Failed to load coding plan data'))
-      )
-      setErrorMessage(message)
-      handleServerError(error, message, { title: message })
-    } finally {
-      setLoading(false)
-    }
-  }, [currentRow, mode, t])
+    },
+    [channelId, mode, needsKeySelection, open, t]
+  )
 
   useEffect(() => {
     setResetSelection(null)
+    setKeys([])
+    setSelectedKeyIndex(undefined)
     if (!open) return
     setQuota(undefined)
     setRisk(undefined)
     setResetCards(undefined)
     setErrorMessage(null)
     void loadData()
+    const requests = requestId.current
+    return () => {
+      requests.value++
+    }
   }, [loadData, open])
 
   const handleReset = async () => {
@@ -228,9 +311,16 @@ export function CodingPlanDialog({
   if (loading) {
     body = (
       <div className='text-muted-foreground flex items-center justify-center gap-2 py-8 text-sm'>
-        <Loader2 className='size-4 animate-spin' />
-        {t('Loading...')}
+        <LoadingState inline size='sm' message={t('Loading...')} />
       </div>
+    )
+  } else if (needsKeySelection && errorMessage) {
+    body = (
+      <ErrorState
+        title={t('Request failed')}
+        description={errorMessage}
+        className='min-h-0 py-6'
+      />
     )
   } else if (errorMessage) {
     body = (
@@ -239,6 +329,13 @@ export function CodingPlanDialog({
         <AlertTitle>{t('Request failed')}</AlertTitle>
         <AlertDescription>{errorMessage}</AlertDescription>
       </Alert>
+    )
+  } else if (needsKeySelection && selectedKeyIndex === undefined) {
+    body = (
+      <EmptyState
+        title={t('No enabled keys available')}
+        className='min-h-0 py-6'
+      />
     )
   } else if (mode === 'quota') {
     if (quota?.credential === 'expired') {
@@ -250,6 +347,12 @@ export function CodingPlanDialog({
           </AlertDescription>
         </Alert>
       )
+    } else if (
+      needsKeySelection &&
+      quota?.quota_supported &&
+      quota.tiers.length === 0
+    ) {
+      body = <EmptyState title={t('No Data')} className='min-h-0 py-6' />
     } else if (quota?.quota_supported) {
       body = (
         <div className='space-y-3'>
@@ -344,7 +447,7 @@ export function CodingPlanDialog({
           <>
             <Button
               variant='outline'
-              onClick={() => void loadData()}
+              onClick={() => void loadData(selectedKeyIndex, needsKeySelection)}
               disabled={loading}
             >
               {loading ? (
@@ -364,6 +467,70 @@ export function CodingPlanDialog({
           </>
         }
       >
+        {needsKeySelection && (
+          <div className='space-y-2'>
+            <Label htmlFor={keySelectId}>{t('Query key')}</Label>
+            <Select
+              value={selectedKeyIndex ?? null}
+              items={keys.map((key) => ({
+                value: key.index,
+                label: t('Key {{number}} · {{identifier}}', {
+                  number: key.index + 1,
+                  identifier: key.identifier,
+                }),
+              }))}
+              disabled={keys.length === 0}
+              onValueChange={(value) => {
+                if (
+                  value === null ||
+                  !keys.some((key) => key.index === value && key.enabled)
+                ) {
+                  return
+                }
+                setSelectedKeyIndex(value)
+                void loadData(value)
+              }}
+            >
+              <SelectTrigger
+                id={keySelectId}
+                className='w-full'
+                aria-describedby={`${keySelectId}-hint`}
+              >
+                <SelectValue placeholder={t('Select a key')} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {keys.map((key) => (
+                    <SelectItem
+                      key={key.index}
+                      value={key.index}
+                      disabled={!key.enabled}
+                    >
+                      {t('Key {{number}} · {{identifier}}', {
+                        number: key.index + 1,
+                        identifier: key.identifier,
+                      })}
+                      {!key.enabled && (
+                        <span className='text-muted-foreground'>
+                          {' '}
+                          ({t('Disabled')})
+                        </span>
+                      )}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <p
+              id={`${keySelectId}-hint`}
+              className='text-muted-foreground text-xs'
+            >
+              {t(
+                'Select a key to query its status. Refresh checks the selected key again.'
+              )}
+            </p>
+          </div>
+        )}
         {body}
       </Dialog>
 

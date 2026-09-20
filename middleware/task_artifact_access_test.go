@@ -152,6 +152,47 @@ func TestSetUpLoggerNeverWritesTaskArtifactAccess(t *testing.T) {
 	assert.False(t, strings.Contains(output.String(), "never-log-this"))
 }
 
+func TestSetUpLoggerRedactsCodingPlanQueriesWithoutChangingRequests(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousWriter := gin.DefaultWriter
+	var output bytes.Buffer
+	gin.DefaultWriter = &output
+	t.Cleanup(func() { gin.DefaultWriter = previousWriter })
+
+	for _, tc := range []struct {
+		name, path, query, keyIndex string
+		redacted                    bool
+	}{
+		{name: "key options", path: "/api/channel/plan/keys/1", query: "key_index=1&key=never-log-this", keyIndex: "1", redacted: true},
+		{name: "quota invalid index", path: "/api/channel/plan/quota/1", query: "key_index=never-log-this", keyIndex: "never-log-this", redacted: true},
+		{name: "risk encoded secret", path: "/api/channel/plan/glm/risk/1", query: "key_index=%6E%65%76%65%72%2D%6C%6F%67%2D%74%68%69%73&key=%73%65%63%72%65%74", keyIndex: "never-log-this", redacted: true},
+		{name: "ordinary channel", path: "/api/channel/1", query: "key_index=1&offset=2", keyIndex: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output.Reset()
+			router := gin.New()
+			SetUpLogger(router)
+			router.GET(tc.path, func(c *gin.Context) {
+				assert.Equal(t, tc.query, c.Request.URL.RawQuery)
+				assert.Equal(t, tc.keyIndex, c.Query("key_index"))
+				c.Status(http.StatusNoContent)
+			})
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, tc.path+"?"+tc.query, nil))
+			assert.Equal(t, http.StatusNoContent, recorder.Code)
+			assert.Contains(t, output.String(), tc.path)
+			if tc.redacted {
+				assert.NotContains(t, output.String(), tc.query)
+				assert.NotContains(t, output.String(), "key_index")
+				assert.NotContains(t, output.String(), "never-log-this")
+				assert.NotContains(t, output.String(), "secret")
+				return
+			}
+			assert.Contains(t, output.String(), tc.path+"?"+tc.query)
+		})
+	}
+}
+
 func urlQueryEscape(value string) string {
 	replacer := strings.NewReplacer("+", "%2B", "=", "%3D")
 	return replacer.Replace(value)

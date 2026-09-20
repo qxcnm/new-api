@@ -26,6 +26,7 @@ import type {
   BatchSetTagParams,
   Channel,
   ChannelBalanceResponse,
+  CodingPlanKeysResponse,
   CodingPlanQuotaResponse,
   CodingPlanResetCardsResponse,
   CodingPlanRiskResponse,
@@ -269,22 +270,40 @@ export async function updateChannelBalance(
   return res.data
 }
 
-export async function getCodingPlanQuota(
+export async function getCodingPlanKeys(
   channelId: number
-): Promise<CodingPlanQuotaResponse> {
+): Promise<CodingPlanKeysResponse> {
   const res = await api.get(
-    `/api/channel/plan/quota/${channelId}`,
+    `/api/channel/plan/keys/${channelId}`,
     channelActionConfig({ disableDuplicate: true })
   )
   return res.data
 }
 
+export async function getCodingPlanQuota(
+  channelId: number,
+  keyIndex?: number
+): Promise<CodingPlanQuotaResponse> {
+  const res = await api.get(
+    `/api/channel/plan/quota/${channelId}`,
+    channelActionConfig({
+      disableDuplicate: true,
+      ...(keyIndex === undefined ? {} : { params: { key_index: keyIndex } }),
+    })
+  )
+  return res.data
+}
+
 export async function getGLMRiskStatus(
-  channelId: number
+  channelId: number,
+  keyIndex?: number
 ): Promise<CodingPlanRiskResponse> {
   const res = await api.get(
     `/api/channel/plan/glm/risk/${channelId}`,
-    channelActionConfig({ disableDuplicate: true })
+    channelActionConfig({
+      disableDuplicate: true,
+      ...(keyIndex === undefined ? {} : { params: { key_index: keyIndex } }),
+    })
   )
   return res.data
 }
