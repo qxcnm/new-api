@@ -161,16 +161,39 @@ export function isMultiKeyChannel(channel: Channel): boolean {
   return channel.channel_info?.is_multi_key || false
 }
 
+/** CodingPlan aliases that are stored in the existing base_url field. */
+export type CodingPlanAccessMode =
+  | 'standard'
+  | 'glm-coding-plan'
+  | 'glm-coding-plan-international'
+  | 'kimi-coding-plan'
+  | 'minimax-coding-plan'
+  | 'minimax-coding-plan-international'
+
+/** Recognize saved CodingPlan address aliases without adding a persisted form field. */
+export function getCodingPlanAccessMode(
+  baseUrl?: string
+): CodingPlanAccessMode {
+  const normalized = (baseUrl ?? '').trim().replace(/\/+$/, '')
+  switch (normalized) {
+    case 'glm-coding-plan':
+    case 'glm-coding-plan-international':
+    case 'kimi-coding-plan':
+    case 'minimax-coding-plan':
+    case 'minimax-coding-plan-international':
+      return normalized
+    default:
+      return 'standard'
+  }
+}
+
 /** Recognize saved GLM address aliases without adding a persisted form field. */
 export function getGlmAccessMode(
   baseUrl?: string
 ): 'standard' | 'glm-coding-plan' | 'glm-coding-plan-international' {
-  const normalized = (baseUrl ?? '').trim().replace(/\/+$/, '')
-  if (
-    normalized === 'glm-coding-plan' ||
-    normalized === 'glm-coding-plan-international'
-  ) {
-    return normalized
+  const mode = getCodingPlanAccessMode(baseUrl)
+  if (mode === 'glm-coding-plan' || mode === 'glm-coding-plan-international') {
+    return mode
   }
   return 'standard'
 }

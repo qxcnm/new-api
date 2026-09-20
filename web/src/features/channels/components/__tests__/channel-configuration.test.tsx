@@ -298,6 +298,51 @@ test('GLM access mode restores the standard address when switching back with the
 })
 
 test.each([
+  ['Moonshot Built-in #25', 'CodingPlan', 25, 'kimi-coding-plan'],
+  ['MiniMax Built-in #35', 'CodingPlan (China)', 35, 'minimax-coding-plan'],
+  [
+    'MiniMax Built-in #35',
+    'CodingPlan (International)',
+    35,
+    'minimax-coding-plan-international',
+  ],
+])(
+  '%s exposes the CodingPlan selector and submits the selected alias',
+  async (provider, label, type, baseUrl) => {
+    const post = vi
+      .spyOn(api, 'post')
+      .mockResolvedValue({ data: { success: true, data: ['plan-model'] } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness />)
+    await user.click(screen.getByRole('option', { name: provider }))
+    const mode = screen.getByRole('combobox', { name: 'Access mode' })
+    await user.click(mode)
+    await user.click(screen.getByRole('option', { name: label }))
+    expect(mode).toHaveTextContent(label)
+    expect(
+      screen.queryByRole('textbox', { name: 'Base URL' })
+    ).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('API Key *'), {
+      target: { value: 'fixture-key' },
+    })
+    await user.click(
+      screen.getByRole('button', { name: 'Fetch from Upstream' })
+    )
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        '/api/channel/fetch_models',
+        expect.objectContaining({
+          type,
+          base_url: baseUrl,
+          key: 'fixture-key',
+        }),
+        expect.anything()
+      )
+    )
+  }
+)
+
+test.each([
   ['DeepSeek Built-in #43', ''],
   ['Video A Plugin video-a', 'https://a.example'],
   ['No Address Plugin no-address', ''],

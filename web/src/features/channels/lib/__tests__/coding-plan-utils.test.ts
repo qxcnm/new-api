@@ -9,9 +9,19 @@ the Free Software Foundation, either version 3 of the License, or
 import { describe, expect, test } from 'vitest'
 
 import type { Channel } from '../../types'
-import { isCodingPlanChannel } from '../channel-utils'
+import { getCodingPlanAccessMode, isCodingPlanChannel } from '../channel-utils'
 
 describe('CodingPlan channel actions', () => {
+  test.each([
+    [' glm-coding-plan-international/ ', 'glm-coding-plan-international'],
+    ['kimi-coding-plan', 'kimi-coding-plan'],
+    ['minimax-coding-plan', 'minimax-coding-plan'],
+    ['minimax-coding-plan-international', 'minimax-coding-plan-international'],
+    ['https://api.example.com', 'standard'],
+  ])('recognizes the saved access alias %s', (baseUrl, expected) => {
+    expect(getCodingPlanAccessMode(baseUrl)).toBe(expected)
+  })
+
   test('shows plan actions only for server-identified plans', () => {
     expect(
       isCodingPlanChannel({

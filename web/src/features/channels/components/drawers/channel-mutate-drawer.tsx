@@ -161,7 +161,8 @@ import {
   channelFormSchema,
   channelsQueryKeys,
   getAdvancedCustomStats,
-  getGlmAccessMode,
+  getCodingPlanAccessMode,
+  type CodingPlanAccessMode,
   transformChannelToFormDefaults,
   type ChannelFormValues,
   deduplicateKeys,
@@ -522,10 +523,62 @@ export function ChannelMutateDrawer({
     defaultBaseURLs?.[currentType] || t(FIELD_PLACEHOLDERS.BASE_URL)
   const currentStatus = formValues.status
   const currentBaseUrl = formValues.base_url
-  const glmAccessMode = getGlmAccessMode(currentBaseUrl)
-  const glmAccessModeId = useId()
-  const glmStandardBaseUrl = useRef('')
-  const isGlmCodingPlan = currentType === 26 && glmAccessMode !== 'standard'
+  const savedCodingPlanAccessMode = getCodingPlanAccessMode(currentBaseUrl)
+  let codingPlanAccessMode: CodingPlanAccessMode = 'standard'
+  if (currentType === 25 && savedCodingPlanAccessMode === 'kimi-coding-plan') {
+    codingPlanAccessMode = savedCodingPlanAccessMode
+  } else if (
+    currentType === 26 &&
+    (savedCodingPlanAccessMode === 'glm-coding-plan' ||
+      savedCodingPlanAccessMode === 'glm-coding-plan-international')
+  ) {
+    codingPlanAccessMode = savedCodingPlanAccessMode
+  } else if (
+    currentType === 35 &&
+    (savedCodingPlanAccessMode === 'minimax-coding-plan' ||
+      savedCodingPlanAccessMode === 'minimax-coding-plan-international')
+  ) {
+    codingPlanAccessMode = savedCodingPlanAccessMode
+  }
+  const codingPlanAccessModeId = useId()
+  const codingPlanStandardBaseUrl = useRef('')
+  const isGlmCodingPlan =
+    currentType === 26 &&
+    (codingPlanAccessMode === 'glm-coding-plan' ||
+      codingPlanAccessMode === 'glm-coding-plan-international')
+  const isMoonshotCodingPlan =
+    currentType === 25 && codingPlanAccessMode === 'kimi-coding-plan'
+  const isMiniMaxCodingPlan =
+    currentType === 35 &&
+    (codingPlanAccessMode === 'minimax-coding-plan' ||
+      codingPlanAccessMode === 'minimax-coding-plan-international')
+  const isCodingPlanFormMode =
+    isGlmCodingPlan || isMoonshotCodingPlan || isMiniMaxCodingPlan
+  const showGeneralBaseUrl =
+    ![3, 8, 22, 36, 45].includes(currentType) && !isCodingPlanFormMode
+  const codingPlanModeItems = [{ value: 'standard', label: t('Standard API') }]
+  if (currentType === 25) {
+    codingPlanModeItems.push({
+      value: 'kimi-coding-plan',
+      label: t('CodingPlan'),
+    })
+  } else if (currentType === 35) {
+    codingPlanModeItems.push(
+      { value: 'minimax-coding-plan', label: t('CodingPlan (China)') },
+      {
+        value: 'minimax-coding-plan-international',
+        label: t('CodingPlan (International)'),
+      }
+    )
+  } else if (currentType === 26) {
+    codingPlanModeItems.push(
+      { value: 'glm-coding-plan', label: t('CodingPlan (China)') },
+      {
+        value: 'glm-coding-plan-international',
+        label: t('CodingPlan (International)'),
+      }
+    )
+  }
   const currentTaskPluginKey = formValues.task_plugin_key
   const currentKey = formValues.key
   const currentModels = formValues.models
@@ -736,9 +789,12 @@ export function ChannelMutateDrawer({
         setChoosingProvider(false)
         return
       }
-      const leavingGlmPlan =
-        form.getValues('type') === 26 &&
-        getGlmAccessMode(form.getValues('base_url')) !== 'standard'
+      const currentProviderType = form.getValues('type')
+      const leavingCodingPlan =
+        (currentProviderType === 25 ||
+          currentProviderType === 26 ||
+          currentProviderType === 35) &&
+        getCodingPlanAccessMode(form.getValues('base_url')) !== 'standard'
       if (target.kind === 'plugin') {
         if (!canBindTaskPlugin) return
         const plugin = taskPluginOptionsQuery.data?.find(
@@ -759,11 +815,11 @@ export function ChannelMutateDrawer({
           })
         }
         const baseUrl = nextTaskPluginBaseUrl(
-          leavingGlmPlan ? '' : form.getValues('base_url'),
+          leavingCodingPlan ? '' : form.getValues('base_url'),
           previousPlugin?.baseUrl,
           plugin.baseUrl
         )
-        if (baseUrl !== null || leavingGlmPlan) {
+        if (baseUrl !== null || leavingCodingPlan) {
           form.setValue('base_url', baseUrl ?? '', {
             shouldDirty: true,
             shouldValidate: true,
@@ -777,7 +833,7 @@ export function ChannelMutateDrawer({
         ) {
           return
         }
-        if (leavingGlmPlan) {
+        if (leavingCodingPlan) {
           form.setValue('base_url', '', { shouldDirty: true })
         }
         form.setValue('type', target.type, { shouldDirty: true })
@@ -788,7 +844,7 @@ export function ChannelMutateDrawer({
           form.setValue('name', label ? t(label) : `#${target.type}`)
         }
       }
-      glmStandardBaseUrl.current = ''
+      codingPlanStandardBaseUrl.current = ''
       setProviderTarget(target)
       setChoosingProvider(false)
     },
@@ -938,7 +994,7 @@ export function ChannelMutateDrawer({
   // Load channel data into form when editing
   useEffect(() => {
     if (!open) {
-      glmStandardBaseUrl.current = ''
+      codingPlanStandardBaseUrl.current = ''
       setModelConfiguration(null)
       form.reset(CHANNEL_FORM_DEFAULT_VALUES)
       loadedForm.current = null
@@ -959,7 +1015,7 @@ export function ChannelMutateDrawer({
         return
       }
       const defaults = transformChannelToFormDefaults(channelData.data)
-      glmStandardBaseUrl.current = ''
+      codingPlanStandardBaseUrl.current = ''
       form.reset(defaults)
       loadedForm.current = {
         channelId: channelData.data.id,
@@ -3688,38 +3744,38 @@ export function ChannelMutateDrawer({
               />
             )}
 
-            {currentType === 26 && (
+            {(currentType === 25 ||
+              currentType === 26 ||
+              currentType === 35) && (
               <div className='grid gap-2'>
-                <Label htmlFor={glmAccessModeId}>{t('Access mode')}</Label>
+                <Label htmlFor={codingPlanAccessModeId}>
+                  {t('Access mode')}
+                </Label>
                 <Select
                   disabled={sensitiveLocked}
-                  value={glmAccessMode}
-                  items={[
-                    { value: 'standard', label: t('Standard API') },
-                    {
-                      value: 'glm-coding-plan',
-                      label: t('CodingPlan (China)'),
-                    },
-                    {
-                      value: 'glm-coding-plan-international',
-                      label: t('CodingPlan (International)'),
-                    },
-                  ]}
+                  value={codingPlanAccessMode}
+                  items={codingPlanModeItems}
                   onValueChange={(value) => {
-                    if (!value || sensitiveLocked || value === glmAccessMode) {
+                    if (
+                      !value ||
+                      sensitiveLocked ||
+                      value === codingPlanAccessMode
+                    ) {
                       return
                     }
-                    if (glmAccessMode === 'standard') {
-                      glmStandardBaseUrl.current = currentBaseUrl ?? ''
+                    if (codingPlanAccessMode === 'standard') {
+                      codingPlanStandardBaseUrl.current = currentBaseUrl ?? ''
                     }
                     form.setValue(
                       'base_url',
-                      value === 'standard' ? glmStandardBaseUrl.current : value,
+                      value === 'standard'
+                        ? codingPlanStandardBaseUrl.current
+                        : value,
                       { shouldDirty: true, shouldValidate: true }
                     )
                   }}
                 >
-                  <SelectTrigger id={glmAccessModeId}>
+                  <SelectTrigger id={codingPlanAccessModeId}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent alignItemWithTrigger={false}>
@@ -3727,12 +3783,31 @@ export function ChannelMutateDrawer({
                       <SelectItem value='standard'>
                         {t('Standard API')}
                       </SelectItem>
-                      <SelectItem value='glm-coding-plan'>
-                        {t('CodingPlan (China)')}
-                      </SelectItem>
-                      <SelectItem value='glm-coding-plan-international'>
-                        {t('CodingPlan (International)')}
-                      </SelectItem>
+                      {currentType === 25 && (
+                        <SelectItem value='kimi-coding-plan'>
+                          {t('CodingPlan')}
+                        </SelectItem>
+                      )}
+                      {currentType === 26 && (
+                        <>
+                          <SelectItem value='glm-coding-plan'>
+                            {t('CodingPlan (China)')}
+                          </SelectItem>
+                          <SelectItem value='glm-coding-plan-international'>
+                            {t('CodingPlan (International)')}
+                          </SelectItem>
+                        </>
+                      )}
+                      {currentType === 35 && (
+                        <>
+                          <SelectItem value='minimax-coding-plan'>
+                            {t('CodingPlan (China)')}
+                          </SelectItem>
+                          <SelectItem value='minimax-coding-plan-international'>
+                            {t('CodingPlan (International)')}
+                          </SelectItem>
+                        </>
+                      )}
                     </SelectGroup>
                   </SelectContent>
                 </Select>
@@ -3740,7 +3815,7 @@ export function ChannelMutateDrawer({
             )}
 
             {/* General base_url for other types */}
-            {![3, 8, 22, 36, 45].includes(currentType) && !isGlmCodingPlan && (
+            {showGeneralBaseUrl && (
               <FormField
                 control={form.control}
                 name='base_url'
