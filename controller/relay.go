@@ -197,8 +197,19 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	// rotating keys; the normal retry path otherwise selects another channel.
 	var sequentialRetryChannel *model.Channel
 	sequentialKeyAttempts := 0
+	concurrencyReselections := 0
+	var releaseChannelConcurrency func()
+	defer func() {
+		if releaseChannelConcurrency != nil {
+			releaseChannelConcurrency()
+		}
+	}()
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+		if releaseChannelConcurrency != nil {
+			releaseChannelConcurrency()
+			releaseChannelConcurrency = nil
+		}
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		var channel *model.Channel
 		if sequentialRetryChannel != nil {
@@ -210,7 +221,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			}
 		} else {
 			var channelErr *types.NewAPIError
-			channel, channelErr = getChannel(c, relayInfo, retryParam)
+			channel, channelErr = getChannel(c, relayInfo, retryParam, concurrencyReselections > 0)
 			if channelErr != nil {
 				logger.LogError(c, channelErr.Error())
 				newAPIError = channelErr
@@ -221,6 +232,25 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			} else {
 				sequentialKeyAttempts = 0
 			}
+		}
+		var acquired bool
+		releaseChannelConcurrency, acquired = acquireChannelConcurrency(c, channel)
+		if !acquired {
+			newAPIError = types.NewErrorWithStatusCode(
+				fmt.Errorf("channel #%d concurrency limit reached", channel.Id),
+				types.ErrorCodeChannelConcurrencyLimit,
+				http.StatusTooManyRequests,
+			)
+			relayInfo.LastError = newAPIError
+			processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
+			if !canReselectChannelForConcurrency(c, concurrencyReselections) {
+				break
+			}
+			sequentialRetryChannel = nil
+			sequentialKeyAttempts = 0
+			concurrencyReselections++
+			retryParam.ResetRetryNextTry()
+			continue
 		}
 		addUsedChannel(c, channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
@@ -254,6 +284,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if newAPIError == nil {
 			relayInfo.LastError = nil
 			return
+		}
+		if releaseChannelConcurrency != nil {
+			releaseChannelConcurrency()
+			releaseChannelConcurrency = nil
 		}
 
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
@@ -343,6 +377,39 @@ func addUsedChannel(c *gin.Context, channelId int) {
 	c.Set("use_channel", useChannel)
 }
 
+func acquireChannelConcurrency(c *gin.Context, channel *model.Channel) (func(), bool) {
+	if c != nil {
+		if release, ok := c.Get("channel_concurrency_release"); ok {
+			if channelID, valid := c.Get("channel_concurrency_channel_id"); valid {
+				if id, ok := channelID.(int); ok && channel != nil && id == channel.Id {
+					if release, ok := release.(func()); ok && release != nil {
+						// The middleware lease is transferred to the relay lifecycle.
+						// Remove the one-shot handle before retries so a released lease
+						// cannot be reused without incrementing the active count.
+						c.Set("channel_concurrency_release", nil)
+						c.Set("channel_concurrency_channel_id", 0)
+						c.Set("channel_concurrency_middleware_consumed", true)
+						return release, true
+					}
+				}
+			}
+		}
+	}
+	return model.TryAcquireChannelConcurrency(channel)
+}
+
+// Capacity races do not advance the upstream retry priority. Keep a separate
+// bound so competing requests cannot make capacity selection spin indefinitely.
+func canReselectChannelForConcurrency(c *gin.Context, reselections int) bool {
+	if reselections >= 3 || c.Request.Context().Err() != nil {
+		return false
+	}
+	if _, pinned, _ := service.GetChannelConstraints(c).ResolvedPin(); pinned {
+		return false
+	}
+	return !service.ShouldSkipRetryAfterChannelAffinityFailure(c)
+}
+
 func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 	if request == nil {
 		return &types.TokenCountMeta{}
@@ -372,8 +439,11 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 	return meta
 }
 
-func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
-	if info.ChannelMeta == nil {
+func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam, forceReselect bool) (*model.Channel, *types.NewAPIError) {
+	if info.ChannelMeta == nil && !forceReselect {
+		if channel, err := model.CacheGetChannel(c.GetInt("channel_id")); err == nil && channel != nil {
+			return channel, nil
+		}
 		autoBan := c.GetBool("auto_ban")
 		autoBanInt := 1
 		if !autoBan {
@@ -642,9 +712,14 @@ func executeTaskSubmissionWith(
 	diagnostics.start(relayInfo)
 	var result *relay.TaskSubmitResult
 	var taskErr *taskdto.TaskError
+	concurrencyReselections := 0
+	var releaseChannelConcurrency func()
 	durable := false
 	stage := "start"
 	defer func() {
+		if releaseChannelConcurrency != nil {
+			releaseChannelConcurrency()
+		}
 		if !durable && relayInfo.Billing != nil {
 			diagnostics.refund(stage)
 			relayInfo.Billing.Refund(c)
@@ -665,6 +740,10 @@ func executeTaskSubmissionWith(
 	}
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+		if releaseChannelConcurrency != nil {
+			releaseChannelConcurrency()
+			releaseChannelConcurrency = nil
+		}
 		stage = "select_channel"
 		if requestErr := c.Request.Context().Err(); requestErr != nil {
 			diagnostics.cancelled("before_attempt", retryParam.GetRetry()+1)
@@ -672,8 +751,10 @@ func executeTaskSubmissionWith(
 			break
 		}
 		var channel *model.Channel
+		channelLocked := false
 
 		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
+			channelLocked = true
 			channel = lockedCh
 			if retryParam.GetRetry() > 0 {
 				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
@@ -683,7 +764,7 @@ func executeTaskSubmissionWith(
 			}
 		} else {
 			var channelErr *types.NewAPIError
-			channel, channelErr = getChannel(c, relayInfo, retryParam)
+			channel, channelErr = getChannel(c, relayInfo, retryParam, concurrencyReselections > 0)
 			if channelErr != nil {
 				logger.LogError(c, channelErr.Error())
 				taskErr = service.TaskErrorWrapperLocal(channelErr.Err, "get_channel_failed", http.StatusInternalServerError)
@@ -691,6 +772,23 @@ func executeTaskSubmissionWith(
 			}
 		}
 		diagnostics.attempt(retryParam.GetRetry()+1, channel, relayInfo.LockedChannel != nil)
+		var acquired bool
+		releaseChannelConcurrency, acquired = acquireChannelConcurrency(c, channel)
+		if !acquired {
+			taskErr = service.TaskErrorWrapperLocal(
+				fmt.Errorf("channel #%d concurrency limit reached", channel.Id),
+				string(types.ErrorCodeChannelConcurrencyLimit),
+				http.StatusTooManyRequests,
+			)
+			willRetry := !channelLocked && canReselectChannelForConcurrency(c, concurrencyReselections)
+			diagnostics.attemptFailed(retryParam.GetRetry()+1, channel, taskErr, willRetry)
+			if !willRetry {
+				break
+			}
+			concurrencyReselections++
+			retryParam.ResetRetryNextTry()
+			continue
+		}
 
 		addUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
@@ -707,6 +805,10 @@ func executeTaskSubmissionWith(
 
 		stage = "submit"
 		result, taskErr = submit(c, relayInfo)
+		if releaseChannelConcurrency != nil {
+			releaseChannelConcurrency()
+			releaseChannelConcurrency = nil
+		}
 		if requestErr := c.Request.Context().Err(); requestErr != nil {
 			diagnostics.cancelled("after_submit", retryParam.GetRetry()+1)
 			taskErr = service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)

@@ -467,6 +467,11 @@ func channelUpstreamModelURL(channelType int, baseURL string) string {
 			return fmt.Sprintf("%s/models", plan.OpenAIBaseURL)
 		}
 		return fmt.Sprintf("%s/v1/models", baseURL)
+	case constant.ChannelTypeMiniMax:
+		if plan, ok := constant.ChannelSpecialBases[planName]; ok && isPlan && plan.OpenAIBaseURL != "" {
+			return fmt.Sprintf("%s/v1/models", plan.OpenAIBaseURL)
+		}
+		return fmt.Sprintf("%s/v1/models", baseURL)
 	default:
 		return fmt.Sprintf("%s/v1/models", baseURL)
 	}

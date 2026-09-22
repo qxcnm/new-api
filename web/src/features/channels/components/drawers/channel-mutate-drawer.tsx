@@ -174,6 +174,7 @@ import {
   hasModelConfigChanged,
   findMissingModelsInMapping,
   validateModelMappingJson,
+  MAX_CHANNEL_CONCURRENCY,
 } from '../../lib'
 import {
   getChannelConfigurationSection,
@@ -1942,6 +1943,34 @@ export function ChannelMutateDrawer({
                 />
               </FormControl>
               <FormDescription>{t(FIELD_DESCRIPTIONS.WEIGHT)}</FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name='max_concurrency'
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>{t('Channel Concurrency Limit')}</FormLabel>
+              <FormControl>
+                <Input
+                  type='number'
+                  min={0}
+                  max={MAX_CHANNEL_CONCURRENCY}
+                  step={1}
+                  placeholder='0'
+                  {...field}
+                  onChange={(event) => {
+                    const value = event.target.value
+                    field.onChange(value === '' ? 0 : Number(value))
+                  }}
+                />
+              </FormControl>
+              <FormDescription>
+                {t(FIELD_DESCRIPTIONS.MAX_CONCURRENCY)}
+              </FormDescription>
               <FormMessage />
             </FormItem>
           )}

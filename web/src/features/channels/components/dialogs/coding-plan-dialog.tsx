@@ -100,6 +100,7 @@ export function CodingPlanDialog({
   )
   const keySelectId = useId()
   const requestId = useRef({ value: 0 })
+  const resetRequestId = useRef({ value: 0 })
   const [keys, setKeys] = useState<CodingPlanKey[]>([])
   const [selectedKeyIndex, setSelectedKeyIndex] = useState<number>()
   const [loading, setLoading] = useState(false)
@@ -198,6 +199,7 @@ export function CodingPlanDialog({
 
   useEffect(() => {
     setResetSelection(null)
+    setResetting(false)
     setKeys([])
     setSelectedKeyIndex(undefined)
     if (!open) return
@@ -207,19 +209,27 @@ export function CodingPlanDialog({
     setErrorMessage(null)
     void loadData()
     const requests = requestId.current
+    const resets = resetRequestId.current
     return () => {
       requests.value++
+      resets.value++
     }
   }, [loadData, open])
 
   const handleReset = async () => {
     if (!currentRow || !resetSelection) return
+    const resetChannelId = currentRow.id
+    const activeReset = ++resetRequestId.current.value
+    const selectedReset = resetSelection
     setResetting(true)
     try {
-      const response = await resetGLMCard(currentRow.id, {
-        record_id: resetSelection.card.recordId,
-        reset_type: resetSelection.type,
+      const response = await resetGLMCard(resetChannelId, {
+        record_id: selectedReset.card.recordId,
+        reset_type: selectedReset.type,
       })
+      // A new dialog invalidates mutations independently of data refreshes,
+      // so a late response cannot update another channel's state.
+      if (resetRequestId.current.value !== activeReset) return
       if (!response.success) {
         throw createServerError(response, t('Failed to use reset card'))
       }
@@ -230,13 +240,14 @@ export function CodingPlanDialog({
         queryKey: channelsQueryKeys.lists(),
       })
     } catch (error: unknown) {
+      if (resetRequestId.current.value !== activeReset) return
       const message = t(
         getServerErrorMessage(error, t('Failed to use reset card'))
       )
       setErrorMessage(message)
       handleServerError(error, message, { title: message })
     } finally {
-      setResetting(false)
+      if (resetRequestId.current.value === activeReset) setResetting(false)
     }
   }
 

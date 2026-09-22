@@ -34,6 +34,7 @@ type ModelRequest struct {
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		var channel *model.Channel
+		channelPinned := false
 		constraints := service.GetChannelConstraints(c)
 		constraints.AddFilter(taskdto.ChannelFilter{
 			Kind:        taskdto.FilterRequestPath,
@@ -46,6 +47,7 @@ func Distribute() func(c *gin.Context) {
 			return
 		}
 		if pin, found, overridden := constraints.ResolvedPin(); found {
+			channelPinned = true
 			for _, lost := range overridden {
 				logger.LogWarn(c, fmt.Sprintf(
 					"channel pin overridden: winning_source=%s winning_channel_id=%d overridden_source=%s overridden_channel_id=%d",
@@ -199,17 +201,56 @@ func Distribute() func(c *gin.Context) {
 			}
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
+		initialChannelID := 0
+		var initialChannelRelease func()
 		if channel != nil {
+			initialChannelID = channel.Id
 			if setupErr := SetupContextForSelectedChannel(c, channel, modelRequest.Model); setupErr != nil {
 				abortWithOpenAiMessage(c, setupErr.StatusCode, setupErr.Error(), setupErr.GetErrorCode())
+				return
+			}
+			release, acquired := model.TryAcquireChannelConcurrency(channel)
+			if !acquired && !channelPinned && !service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+				fallback, _, selectErr := service.CacheGetRandomSatisfiedChannel(&service.RetryParam{
+					Ctx:         c,
+					ModelName:   modelRequest.Model,
+					TokenGroup:  common.GetContextKeyString(c, constant.ContextKeyUsingGroup),
+					RequestPath: c.Request.URL.Path,
+					Retry:       common.GetPointer(0),
+				})
+				if selectErr == nil && fallback != nil && fallback.Id != channel.Id {
+					channel = fallback
+					if setupErr := SetupContextForSelectedChannel(c, channel, modelRequest.Model); setupErr != nil {
+						abortWithOpenAiMessage(c, setupErr.StatusCode, setupErr.Error(), setupErr.GetErrorCode())
+						return
+					}
+					release, acquired = model.TryAcquireChannelConcurrency(channel)
+				}
+			}
+			if acquired {
+				initialChannelRelease = release
+				c.Set("channel_concurrency_release", release)
+				c.Set("channel_concurrency_channel_id", channel.Id)
+			} else {
+				abortWithOpenAiMessage(
+					c,
+					http.StatusTooManyRequests,
+					"channel concurrency limit reached",
+					types.ErrorCodeChannelConcurrencyLimit,
+				)
 				return
 			}
 		} else {
 			c.Set("original_model", modelRequest.Model)
 		}
+		defer func() {
+			if initialChannelRelease != nil && !c.GetBool("channel_concurrency_middleware_consumed") {
+				initialChannelRelease()
+			}
+		}()
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
-			service.RecordChannelAffinity(c, channel.Id)
+			service.RecordChannelAffinity(c, initialChannelID)
 		}
 	}
 }
@@ -681,9 +722,11 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	}
 	common.SetContextKey(c, constant.ContextKeyChannelParamOverride, paramOverride)
 	common.SetContextKey(c, constant.ContextKeyChannelHeaderOverride, headerOverride)
-	if nil != channel.OpenAIOrganization && *channel.OpenAIOrganization != "" {
-		common.SetContextKey(c, constant.ContextKeyChannelOrganization, *channel.OpenAIOrganization)
+	organization := ""
+	if channel.OpenAIOrganization != nil {
+		organization = *channel.OpenAIOrganization
 	}
+	common.SetContextKey(c, constant.ContextKeyChannelOrganization, organization)
 	common.SetContextKey(c, constant.ContextKeyChannelAutoBan, channel.GetAutoBan())
 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, constant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())

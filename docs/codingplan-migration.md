@@ -293,7 +293,7 @@ GLM 渠道表单新增“接入类型”：普通 API、CodingPlan 国内版、C
 
 ### 最终回归和发布前检查（2026-09-20）
 
-回归期间修正了两个兼容性问题：额度客户端现在复制渠道 HTTP 客户端的传输配置但独立设置 15 秒超时，不再改变普通 relay 共享客户端；上游传输/解析错误不再把响应片段、代理凭证或密钥写入日志。MiniMax 的 CodingPlan Chat/Responses 未宣称支持时会明确返回不支持，普通 MiniMax 路径保持原有地址；火山普通 Chat、Bot、Responses、Embedding、Images 路径和模型列表地址均有回归断言。
+回归期间修正了两个兼容性问题：额度客户端按渠道代理配置创建独立 HTTP 客户端并设置 15 秒超时，不改变普通 relay 共享客户端；该管理查询客户端不继承渠道的 HTTP/2 分片或强制 HTTP/1 传输选项。上游传输/解析错误不再把响应片段、代理凭证或密钥写入日志。MiniMax 的 CodingPlan Chat/Responses 未宣称支持时会明确返回不支持，普通 MiniMax 路径保持原有地址；火山普通 Chat、Bot、Responses、Embedding、Images 路径和模型列表地址均有回归断言。
 
 最终通过：受影响后端包的计划、额度、控制器、模型和适配器测试；CodingPlan 定向后端测试；SQLite 3.50.4、MySQL 8.4.11、PostgreSQL 15.19 的 ChannelInfo 旧 JSON 读取/回写和迁移稳定性测试；独立 `relaykit` 构建；前端渠道配置、额度弹窗、计划工具测试共 85 项；前端类型检查、生产构建、修改文件 lint；i18n 同步报告七语言 `missingCount=0`、`extrasCount=0`。完整前端 lint 仍受仓库既有 lint 错误阻塞，修改文件本身无 lint 错误。
 
@@ -331,3 +331,41 @@ go test ./service/planquota -count=1
 修改文件分组：后端 `controller/channel_plan.go`、`model/channel.go`、`service/planquota/client.go`、`router/channel-router.go`、`middleware/logger.go` 及三个现有测试文件；前端渠道 `api.ts`、`types.ts`、现有 CodingPlan Dialog、Dialog/API 测试、`static-keys.ts` 与七语言 locale；文档仅更新本文件。
 
 验证边界：本次新增的多 Key 选择流程没有使用真实 GLM 凭证请求上游，也未进行运行中服务的浏览器验收。此前章节的真实单 Key 上游验收属于历史记录，不替代本次多 Key 实测；真实账号差异、上游权限和限流仍需在部署环境验证。本次不部署或重启现有服务。
+
+### 发布前兼容性复查（2026-09-21）
+
+本轮复查同时包含尚未提交的单渠道并发改动。旧渠道缺少 `channel_info.max_concurrency` 时按 `0`（不限并发）处理；修改并发上限时保留原有多 Key 状态和服务端识别的计划字段。普通 GLM、Moonshot、MiniMax、火山渠道的模型地址及转发路径继续使用原配置，套餐功能只对匹配类型和 CodingPlan 别名的渠道启用。
+
+修正 MiniMax 国内/国际 CodingPlan 模型列表的别名解析和 Anthropic 请求头，默认连接测试改用 Anthropic，显式指定测试协议和普通 MiniMax 行为保持原样。对应 URL、默认协议及普通渠道回归已通过；MiniMax 模型列表仍未使用真实套餐凭据验证，不能将 URL 测试视作真实上游验收。
+
+重置卡弹窗复用现有 Dialog 和 ConfirmDialog，使用独立的操作代数隔离晚到响应：关闭重开或切换渠道后，旧操作不会覆盖新状态，也不会解锁正在进行的新操作；成功刷新数据后按钮恢复可用。弹窗 30 项回归、类型检查、修改文件 oxlint/oxfmt 和前端生产构建通过。测试没有实际消耗重置卡。
+
+并发占用在首次转发时只移交一次，重试必须重新获取，结束和异常退出均释放。容量满额不自动禁用健康渠道。容量竞争的重选保留当前优先级，并单独限制次数以避免循环；明确固定渠道的请求不跨渠道切换。当前计数器仅在单个进程内共享，多副本部署不提供全局渠道并发上限；异步任务只统计提交请求期间的占用，不统计上游任务的整个生成周期。
+
+最终定向后端回归、根模块构建和 `cd relaykit && GOWORK=off go build ./...` 均通过。容量回归实际运行控制器提交循环和数据库候选选择，覆盖初次渠道已满时切换、连续竞争有界退出、固定渠道、请求取消及已释放占用不可复用。前端相关测试共 126 项通过（渠道配置 79、弹窗 30、计划 API/工具和并发工具 17）；渠道配置在本机默认 5 秒时限下有一项超时，使用 `--pool=forks --maxWorkers=1 --testTimeout=20000` 完整复跑 79 项后通过，没有修改断言或生产代码以绕过该用例。
+
+本轮在真实 SQLite **3.50.4**、MySQL **8.4.11**、PostgreSQL **15.19** 上执行以下测试，三个数据库均通过、无跳过：
+
+```sh
+go test ./model -run '^TestChannelPlanJSONDatabases$|^TestChannelInfoOldJSONRemainsReadable$' -count=1 -v
+```
+
+MySQL/PostgreSQL 使用现有测试夹具的 `CHANNEL_MODEL_GROUPS_MYSQL_DSN`、`CHANNEL_MODEL_GROUPS_POSTGRES_DSN` 指向独立验证库，SQLite 使用测试临时库。普通渠道和 GLM 套餐渠道均验证旧 JSON 缺字段读取为 `0`，并发值 `0 → 3 → 0` 写入重读正确，完整 ChannelInfo 保持一致。独立 MySQL 测试容器和 PostgreSQL 验证库已清理，现有业务数据未改动。本轮没有新增表、列或迁移，此结果只证明本次 JSON 持久化兼容性，不替代前述版本升级矩阵。
+
+完整仓库检查仍不能标记为全绿：全量 lint 有既有错误，service 包的 affinity 状态用例仍失败。Kimi、MiniMax、GLM 国际、豆包以及多 Key 查询缺少本轮真实账号验收，保留上述验证边界；本轮未提交、推送或发布。
+
+### 本地更新回归及修复（2026-09-21）
+
+本轮回归与交叉复查发现并修复五项并发回归：普通单 Key 渠道将上限从 `1` 改回 `0` 时，GORM 的结构体更新曾忽略全零 ChannelInfo；渠道满额曾使模型从可用列表消失；首次容量切换曾绕过会话亲和的 `skip_retry_on_failure`；关闭 `switch_on_success` 时容量回退仍改写原亲和绑定；备用渠道未配置组织时会继承原渠道的 OpenAI 组织头。现在管理更新会在原有事务中明确保存 ChannelInfo，普通部分更新仍保留未提供的字段；容量只影响请求选路；亲和重试和成功后切换遵守各自配置；选路时刷新组织值，避免跨渠道残留。对应失败及修复后通过证据均保存在本地忽略目录 `.local-tests/update-validation-20260921/`。
+
+真实 SQLite **3.50.4**、MySQL **8.4.11**、PostgreSQL **15.19** 已执行 `TestChannelConcurrencyManagementDatabaseMatrix`，经实际 `UpdateChannel` 处理器验证普通单 Key、多 Key、CodingPlan 共 9 个场景，无跳过。覆盖 `1 → 0` 的响应及数据库回读、遗漏字段保留、部分模型更新不清空信息、多 Key/plan 元数据保留、Abilities 同步，以及 Abilities 写入失败时渠道信息与路由同时回滚。旧 JSON、Valuer/Scanner、原模型分组管理和重复 AutoMigrate 检查也通过；未新增表、列或迁移，不将这些结果表述为完整已发布版本升级验收。
+
+独立网关通过真实 HTTP 接收请求，上游使用本机可控模拟服务，分别在内存缓存开启、内存缓存关闭、Redis **7.4.11** 开启三种模式下完成 **42 个场景**。覆盖配置保存与边界校验、容量满额切换、全满拒绝且不扣费、满额时模型列表稳定、流式占用及正常/客户端断开释放、禁止重试的亲和约束、成功后切换开关、备用渠道密钥与组织头、上游错误重试、`0` 不限并发，并分别连续重启两次验证配置、余额、认证及路由保留。模拟上游没有使用真实提供商凭据或产生外部调用费用。当前全满的普通选路仍返回 503，固定亲和/选定后容量竞争返回 429；并发上限仍是单进程计数，异步任务仅统计提交过程，管理端连接测试不纳入普通 relay 名额。
+
+前端渠道全套 **18 文件、258 用例**通过，类型检查、修改文件 lint/格式检查、生产构建通过。默认 5 秒限时下一个既有权限用例超时，使用 `bun run test src/features/channels --maxWorkers=2 --testTimeout=15000` 完整复跑通过，未修改测试断言或项目超时配置。后端 model/middleware 全包、功能相关 controller/service、计划额度与 MiniMax/GLM/Moonshot/OpenAI 适配器、router 测试通过；`relaykit` 已执行 `GOWORK=off go build ./...` 独立构建。
+
+仍不能宣称完整后端测试全绿：Windows 下认证/审计用例有 SQLite 临时文件占用清理错误，亲和统计用例有测试状态不稳定，两类问题在独立 HEAD 基线也复现；全量运行另有一次账户删除测试 `SQLITE_BUSY`，单独重跑未复现。外部数据库用例在普通包测试中的跳过不计作通过，以上受影响三库矩阵均单独实际执行。本轮保留现有业务数据，未提交或推送。
+
+随后按用户授权安装当前用户全局 MSYS2 UCRT64 工具链（GCC **16.2.0**、MinGW-w64 runtime **14.0.0**），设置用户 PATH 与 Go 的 `CC`、`CXX`、`CGO_ENABLED=1`，并确认 Windows race 所需的 `libsynchronization.a` 存在。Go **1.26.5 windows/amd64** 下补跑 `go test -race -count=1 -p 1 -json ./model ./middleware ./controller ./service -run '^(TestChannelConcurrencyCompetingRequests|TestChannelConcurrencyPreservesModelDiscovery|TestTryAcquireChannelConcurrencyHonorsLimitAndIdempotentRelease|TestTryAcquireChannelConcurrencyZeroIsUnlimited|TestDistributeConcurrencyHonorsChannelAffinity|TestAcquireChannelConcurrencyDoesNotReuseReleasedMiddlewareLease|TestTaskChannelConcurrencyReselection|TestValidateChannelMaxConcurrency|TestShouldDisableChannelSkipsConcurrencyLimit|TestRunChannelTestWorkersHonorsConfiguredConcurrency)$'`，**19 个测试事件（含子用例）通过**；`go test -race -count=1 -p 1 -json ./model ./controller -run '^(TestChannelPlanJSONDatabases|TestChannelConcurrencyManagementDatabaseMatrix)/sqlite$'`，**7 个测试事件（含子用例）通过**。两组均退出 0，无跳过、失败或数据竞争报告；证据为本地忽略目录中的 `race-results.txt`、`race-*.jsonl`、`toolchain-results.txt`。另使用持久化的系统及用户 PATH 直接复跑并发竞争用例通过。安装前已打开的终端或 Codex 仍持有旧 PATH，需重开才能读取新环境。此次补测仅覆盖所列路径，未将其表述为完整后端竞态检测通过，也未改变此前三库验证和既有基线失败的结论。
+
+本地 3000 服务已切换到本轮测试过的 `local-channel-concurrency-validated` 程序，恢复原 PostgreSQL 和 Redis DB 15 连接；API、前端代理及内嵌前端资源一致性检查通过。重启前后用户/token/渠道数量和 `channel_info` 摘要一致。临时 HTTP 网关及独立数据库/Redis 测试容器均已停止或移除。

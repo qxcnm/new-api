@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	taskdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
@@ -22,6 +25,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestGetChannelDefaultBaseURLsUsesBuiltInDefaults(t *testing.T) {
@@ -160,6 +164,156 @@ func TestResponsesCompactChannelSupport(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			assert.Equal(t, test.want, common.SupportsResponsesCompact(test.channelType, test.apiType))
+		})
+	}
+}
+
+func TestNormalizeChannelTestEndpointUsesAnthropicForMiniMaxCodingPlan(t *testing.T) {
+	baseURL := "minimax-coding-plan-international"
+	channel := &model.Channel{Type: constant.ChannelTypeMiniMax, BaseURL: &baseURL}
+
+	assert.Equal(t, string(constant.EndpointTypeAnthropic), normalizeChannelTestEndpoint(channel, ""))
+	assert.Equal(t, string(constant.EndpointTypeOpenAI), normalizeChannelTestEndpoint(channel, string(constant.EndpointTypeOpenAI)))
+
+	regularBaseURL := "https://api.minimaxi.com"
+	regular := &model.Channel{Type: constant.ChannelTypeMiniMax, BaseURL: &regularBaseURL}
+	assert.Empty(t, normalizeChannelTestEndpoint(regular, ""))
+}
+
+func TestAcquireChannelConcurrencyDoesNotReuseReleasedMiddlewareLease(t *testing.T) {
+	channel := &model.Channel{
+		Id: 910001,
+		ChannelInfo: model.ChannelInfo{
+			MaxConcurrency: 1,
+		},
+	}
+
+	middlewareRelease, acquired := model.TryAcquireChannelConcurrency(channel)
+	require.True(t, acquired)
+	require.NotNil(t, middlewareRelease)
+	t.Cleanup(middlewareRelease)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Set("channel_concurrency_release", middlewareRelease)
+	ctx.Set("channel_concurrency_channel_id", channel.Id)
+
+	relayRelease, acquired := acquireChannelConcurrency(ctx, channel)
+	require.True(t, acquired)
+	require.NotNil(t, relayRelease)
+	t.Cleanup(relayRelease)
+	require.Nil(t, ctx.MustGet("channel_concurrency_release"))
+
+	relayRelease()
+	nextRelease, acquired := acquireChannelConcurrency(ctx, channel)
+	require.True(t, acquired)
+	require.NotNil(t, nextRelease)
+	t.Cleanup(nextRelease)
+	assert.True(t, model.ChannelConcurrencyAtCapacity(channel))
+
+	nextRelease()
+	assert.False(t, model.ChannelConcurrencyAtCapacity(channel))
+}
+
+func TestTaskChannelConcurrencyReselection(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		pinned            bool
+		locked            bool
+		fillSelected      bool
+		cancelOnSelection bool
+		wantQueries       int
+		wantSubmit        bool
+	}{
+		{name: "reselect before channel metadata exists", wantQueries: 2, wantSubmit: true},
+		{name: "pin stays on the original channel", pinned: true, wantQueries: 1},
+		{name: "locked task stays on the original channel", locked: true},
+		{name: "repeated capacity races stop", fillSelected: true, wantQueries: 4},
+		{name: "cancelled capacity selection stops", cancelOnSelection: true, wantQueries: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			previousDB, previousLogDB := model.DB, model.LOG_DB
+			previousMemory, previousRedis, previousRetry := common.MemoryCacheEnabled, common.RedisEnabled, common.RetryTimes
+			previousMainType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()
+			t.Cleanup(func() {
+				model.DB, model.LOG_DB = previousDB, previousLogDB
+				common.MemoryCacheEnabled, common.RedisEnabled, common.RetryTimes = previousMemory, previousRedis, previousRetry
+				common.SetDatabaseTypes(previousMainType, previousLogType)
+			})
+			database := setupModelListControllerTestDB(t)
+			common.MemoryCacheEnabled, common.RetryTimes = false, 0
+			channels := make([]model.Channel, 5)
+			abilities := make([]model.Ability, len(channels))
+			for i := range channels {
+				channels[i] = model.Channel{
+					Id: 920001 + i, Type: constant.ChannelTypeOpenAI,
+					Name: fmt.Sprintf("capacity-%d", i), Key: "fixture-key",
+					Status: common.ChannelStatusEnabled, Group: "default", Models: "concurrency-fixture",
+					Priority: common.GetPointer(int64(10)), ChannelInfo: model.ChannelInfo{MaxConcurrency: 1},
+				}
+				abilities[i] = model.Ability{
+					Group: "default", Model: "concurrency-fixture", ChannelId: channels[i].Id,
+					Enabled: true, Priority: common.GetPointer(int64(10)),
+				}
+			}
+			require.NoError(t, database.Create(&channels).Error)
+			require.NoError(t, database.Create(&abilities).Error)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			requestContext, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			ctx.Request = httptest.NewRequestWithContext(requestContext, http.MethodPost, "/plugin/submit", bytes.NewBufferString(`{}`))
+			ctx.Set("channel_id", channels[0].Id)
+			common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "default")
+			info := &relaycommon.RelayInfo{
+				OriginModelName: "concurrency-fixture", TokenGroup: "default", UsingGroup: "default",
+				TaskRelayInfo: &relaycommon.TaskRelayInfo{},
+			}
+			if test.pinned {
+				service.GetChannelConstraints(ctx).AddPin(taskdto.ChannelPin{
+					ChannelId: channels[0].Id, Source: taskdto.PinSourceToken,
+					Rank: taskdto.PinRankToken, RetryMode: taskdto.PinRetrySingleAttempt,
+				})
+			}
+			if test.locked {
+				info.LockedChannel = &channels[0]
+			}
+			if !test.fillSelected {
+				release, acquired := model.TryAcquireChannelConcurrency(&channels[0])
+				require.True(t, acquired)
+				t.Cleanup(release)
+			}
+			queries := 0
+			require.NoError(t, database.Callback().Query().After("gorm:query").Register("test:occupy-selected-channel", func(tx *gorm.DB) {
+				selected, ok := tx.Statement.Dest.(*model.Channel)
+				if !ok || tx.Error != nil || selected.Id == 0 {
+					return
+				}
+				queries++
+				if test.fillSelected {
+					// Another request wins the slot after the routing snapshot but
+					// before the controller acquires its own lease.
+					release, acquired := model.TryAcquireChannelConcurrency(selected)
+					require.True(t, acquired)
+					t.Cleanup(release)
+				}
+				if test.cancelOnSelection {
+					cancel()
+				}
+			}))
+			submissions := 0
+			_, taskErr := executeTaskSubmissionWith(ctx, info, func(c *gin.Context, _ *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *taskdto.TaskError) {
+				submissions++
+				assert.NotEqual(t, channels[0].Id, c.GetInt("channel_id"))
+				return nil, &taskdto.TaskError{Code: "selected_available_channel", StatusCode: http.StatusBadRequest, LocalError: true}
+			})
+			require.NotNil(t, taskErr)
+			assert.Equal(t, test.wantQueries, queries)
+			if test.wantSubmit {
+				assert.Equal(t, 1, submissions)
+				assert.Equal(t, "selected_available_channel", taskErr.Code)
+			} else {
+				assert.Zero(t, submissions)
+				assert.Equal(t, http.StatusTooManyRequests, taskErr.StatusCode)
+			}
 		})
 	}
 }
@@ -584,6 +738,98 @@ func TestChannelModelGroupsManagementDatabaseMatrix(t *testing.T) {
 				require.True(t, response.Success, response.Message)
 				assert.True(t, model.IsChannelEnabledForGroupModel("default", "gpt-4o", stored.Id))
 				assert.True(t, model.IsChannelEnabledForGroupModel("vip", "gpt-4o-mini", stored.Id))
+			}
+		})
+	}
+}
+
+func TestChannelConcurrencyManagementDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			common.MemoryCacheEnabled = true
+			for _, name := range []string{"single-key", "multi-key", "plan"} {
+				t.Run(name, func(t *testing.T) {
+					channel := model.Channel{
+						Name: name, Type: constant.ChannelTypeOpenAI, Key: "fixture-key",
+						Status: common.ChannelStatusEnabled, Models: "concurrency-before", Group: "default",
+						ChannelInfo: model.ChannelInfo{MaxConcurrency: 1},
+					}
+					if name == "multi-key" {
+						channel.Key = "fixture-key-a\nfixture-key-b"
+						channel.ChannelInfo = model.ChannelInfo{
+							IsMultiKey: true, MultiKeySize: 2, MultiKeyPollingIndex: 1,
+							MultiKeyMode: constant.MultiKeyModePolling, MultiKeyStatusList: map[int]int{1: 2},
+							MultiKeyDisabledReason: map[int]string{1: "fixture disabled"},
+							MultiKeyDisabledTime:   map[int]int64{1: 1700000000}, MaxConcurrency: 1,
+						}
+					}
+					if name == "plan" {
+						channel.Type = constant.ChannelTypeZhipu_v4
+						channel.BaseURL = common.GetPointer("glm-coding-plan")
+						channel.DetectPlan()
+					}
+					require.NoError(t, channel.Insert())
+					wantInfo := channel.ChannelInfo
+					partial := model.Channel{Id: channel.Id, Name: "partial model update"}
+					require.NoError(t, partial.Update())
+					assert.Equal(t, wantInfo, partial.ChannelInfo, "partial model updates must not clear omitted channel info")
+					var response struct {
+						Success bool
+						Message string
+						Data    model.Channel
+					}
+					for _, patch := range []map[string]any{
+						{"id": channel.Id, "name": "unrelated update"},
+						{"id": channel.Id, "channel_info": map[string]any{}},
+					} {
+						modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel", patch, &response)
+						require.True(t, response.Success, response.Message)
+						var stored model.Channel
+						require.NoError(t, db.First(&stored, channel.Id).Error)
+						assert.Equal(t, wantInfo, stored.ChannelInfo, "omitted limit must remain 1")
+					}
+					modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel", map[string]any{
+						"id": channel.Id, "models": "concurrency-after", "channel_info": map[string]any{"max_concurrency": 0},
+					}, &response)
+					require.True(t, response.Success, response.Message)
+					assert.Zero(t, response.Data.ChannelInfo.MaxConcurrency)
+					var stored model.Channel
+					require.NoError(t, db.First(&stored, channel.Id).Error)
+					wantInfo.MaxConcurrency = 0
+					assert.Equal(t, wantInfo, stored.ChannelInfo, "clearing the limit must preserve all other channel info")
+					assert.Equal(t, channel.Key, stored.Key)
+					assert.Equal(t, "concurrency-after", stored.Models)
+					assert.False(t, model.IsChannelEnabledForGroupModel("default", "concurrency-before", channel.Id))
+					assert.True(t, model.IsChannelEnabledForGroupModel("default", "concurrency-after", channel.Id))
+					if name != "single-key" {
+						return
+					}
+					// A failure after the channel write must roll back its JSON and
+					// routing fields together with the ability replacement.
+					require.NoError(t, db.Callback().Create().Before("gorm:create").Register("test:reject-channel-abilities", func(tx *gorm.DB) {
+						if tx.Statement.Table == "abilities" {
+							tx.AddError(errors.New("fixture ability update failed"))
+						}
+					}))
+					t.Cleanup(func() { require.NoError(t, db.Callback().Create().Remove("test:reject-channel-abilities")) })
+					response.Success = true
+					modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel", map[string]any{
+						"id": channel.Id, "models": "must-rollback", "channel_info": map[string]any{"max_concurrency": 7},
+					}, &response)
+					require.False(t, response.Success)
+					var afterFailure model.Channel
+					require.NoError(t, db.First(&afterFailure, channel.Id).Error)
+					assert.Equal(t, stored.ChannelInfo, afterFailure.ChannelInfo)
+					assert.Equal(t, stored.Models, afterFailure.Models)
+					var abilities []model.Ability
+					require.NoError(t, db.Where("channel_id = ?", channel.Id).Find(&abilities).Error)
+					require.Len(t, abilities, 1)
+					assert.Equal(t, "concurrency-after", abilities[0].Model)
+				})
 			}
 		})
 	}

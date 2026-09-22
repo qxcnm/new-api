@@ -49,6 +49,12 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
+	// A full concurrency window is expected load-shedding, not an upstream
+	// channel failure. Do not auto-disable a healthy channel just because its
+	// configured in-flight limit is currently occupied.
+	if err.GetErrorCode() == types.ErrorCodeChannelConcurrencyLimit {
+		return false
+	}
 	if types.IsChannelError(err) {
 		return true
 	}

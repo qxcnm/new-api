@@ -77,6 +77,9 @@ type ChannelInfo struct {
 	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
 	IsPlan                 bool                  `json:"is_plan"`
 	PlanName               string                `json:"plan_name"`
+	// MaxConcurrency limits the number of requests that may be in flight on
+	// this channel. Zero keeps the legacy unlimited behavior.
+	MaxConcurrency int `json:"max_concurrency"`
 }
 
 type ChannelSortOptions struct {
@@ -709,6 +712,16 @@ func (channel *Channel) Insert() error {
 }
 
 func (channel *Channel) Update() error {
+	return channel.update(false)
+}
+
+// UpdateWithChannelInfo persists an explicitly prepared ChannelInfo even when
+// all its fields are zero. Other omitted channel fields retain Update semantics.
+func (channel *Channel) UpdateWithChannelInfo() error {
+	return channel.update(true)
+}
+
+func (channel *Channel) update(writeChannelInfo bool) error {
 	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
 	if channel.ChannelInfo.IsMultiKey {
 		var keyStr string
@@ -749,8 +762,17 @@ func (channel *Channel) Update() error {
 	}
 	var saved Channel
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(channel).Updates(channel).Error; err != nil {
+		updates := tx.Model(channel)
+		if writeChannelInfo {
+			updates = updates.Omit("channel_info")
+		}
+		if err := updates.Updates(channel).Error; err != nil {
 			return err
+		}
+		if writeChannelInfo {
+			if err := tx.Model(channel).Update("channel_info", channel.ChannelInfo).Error; err != nil {
+				return err
+			}
 		}
 		if err := tx.First(&saved, "id = ?", channel.Id).Error; err != nil {
 			return err

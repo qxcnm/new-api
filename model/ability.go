@@ -48,7 +48,7 @@ func GetGroupEnabledModels(group string) []string {
 		return models
 	}
 	seen := make(map[string]bool)
-	for _, ability := range filterAbilitiesByConstraints(abilities, "", nil) {
+	for _, ability := range filterAbilitiesByConstraints(abilities, "", nil, false) {
 		if !seen[ability.Model] {
 			seen[ability.Model] = true
 			models = append(models, ability.Model)
@@ -126,7 +126,7 @@ func GetChannel(
 	if err != nil {
 		return nil, err
 	}
-	abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	abilities = filterAbilitiesByConstraints(abilities, model, filters, true)
 	if len(abilities) > 0 {
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)
@@ -175,7 +175,7 @@ func GetChannel(
 
 // filterAbilitiesByConstraints applies the same ChannelSatisfiesFilters
 // predicate used by the memory-cache path. A failed lookup fails closed.
-func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters []dto.ChannelFilter) []Ability {
+func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters []dto.ChannelFilter, requireCapacity bool) []Ability {
 	if len(abilities) == 0 {
 		return nil
 	}
@@ -207,6 +207,11 @@ func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters
 		requestedModel := modelName
 		if requestedModel == "" {
 			requestedModel = ability.Model
+		}
+		// Model discovery describes configured access. Only request selection
+		// depends on the channel's transient in-flight request count.
+		if requireCapacity && ChannelConcurrencyAtCapacity(channel) {
+			continue
 		}
 		if ok, _ := ChannelSatisfiesFilters(channel, requestedModel, filters); ok && ChannelAllowsModelGroup(channel, ability.Group, requestedModel) && ChannelModelAvailableAt(channel, requestedModel, now) {
 			filtered = append(filtered, ability)

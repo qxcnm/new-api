@@ -230,9 +230,11 @@ var ChannelSpecialBases = map[string]ChannelSpecialBase{
 	},
 	"minimax-coding-plan": {
 		ClaudeBaseURL: "https://api.minimaxi.com/anthropic",
+		OpenAIBaseURL: "https://api.minimaxi.com/anthropic",
 	},
 	"minimax-coding-plan-international": {
 		ClaudeBaseURL: "https://api.minimax.io/anthropic",
+		OpenAIBaseURL: "https://api.minimax.io/anthropic",
 	},
 	"doubao-coding-plan": {
 		ClaudeBaseURL: "https://ark.cn-beijing.volces.com/api/coding",

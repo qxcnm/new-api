@@ -20,11 +20,91 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/model_setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDistributeConcurrencyHonorsChannelAffinity(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	for _, test := range []struct {
+		skipRetry       bool
+		switchOnSuccess bool
+	}{
+		{skipRetry: false, switchOnSuccess: false},
+		{skipRetry: false, switchOnSuccess: true},
+		{skipRetry: true, switchOnSuccess: false},
+		{skipRetry: true, switchOnSuccess: true},
+	} {
+		t.Run(fmt.Sprintf("skip_retry_%t/switch_on_success_%t", test.skipRetry, test.switchOnSuccess), func(t *testing.T) {
+			previousMemory, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled
+			affinitySetting := operation_setting.GetChannelAffinitySetting()
+			previousAffinity := *affinitySetting
+			t.Cleanup(func() {
+				common.MemoryCacheEnabled, common.RedisEnabled = previousMemory, previousRedis
+				*affinitySetting = previousAffinity
+				model.InitChannelCache()
+			})
+			setupOriginTaskDB(t)
+			common.MemoryCacheEnabled, common.RedisEnabled = true, false
+			require.NoError(t, model.DB.AutoMigrate(&model.Ability{}))
+			channels := []model.Channel{
+				{Id: 930001, Name: "affinity-primary", Type: constant.ChannelTypeOpenAI, Key: "fixture-key", Status: common.ChannelStatusEnabled, Group: "default", Models: "capacity-model", OpenAIOrganization: common.GetPointer("primary-org"), ChannelInfo: model.ChannelInfo{MaxConcurrency: 1}},
+				{Id: 930002, Name: "affinity-fallback", Type: constant.ChannelTypeOpenAI, Key: "fixture-key", Status: common.ChannelStatusEnabled, Group: "default", Models: "capacity-model"},
+			}
+			require.NoError(t, model.DB.Create(&channels).Error)
+			for _, channel := range channels {
+				require.NoError(t, model.DB.Create(&model.Ability{Group: "default", Model: "capacity-model", ChannelId: channel.Id, Enabled: true}).Error)
+			}
+			model.InitChannelCache()
+			affinitySetting.Enabled = true
+			affinitySetting.SwitchOnSuccess = test.switchOnSuccess
+			affinitySetting.Rules = []operation_setting.ChannelAffinityRule{{
+				Name: t.Name(), ModelRegex: []string{"^capacity-model$"}, PathRegex: []string{"/v1/chat/completions"},
+				KeySources:      []operation_setting.ChannelAffinityKeySource{{Type: "request_header", Key: "X-Affinity-Key"}},
+				IncludeRuleName: true, IncludeModelName: true, SkipRetryOnFailure: test.skipRetry,
+			}}
+			seed, _ := gin.CreateTestContext(httptest.NewRecorder())
+			seed.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			seed.Request.Header.Set("X-Affinity-Key", "capacity-fixture")
+			service.GetPreferredChannelByAffinity(seed, "capacity-model", "default")
+			service.RecordChannelAffinity(seed, channels[0].Id)
+			t.Cleanup(func() { service.ClearCurrentChannelAffinityCache(seed) })
+			preferredID, found := service.GetPreferredChannelByAffinity(seed, "capacity-model", "default")
+			require.True(t, found)
+			require.Equal(t, channels[0].Id, preferredID)
+			release, acquired := model.TryAcquireChannelConcurrency(&channels[0])
+			require.True(t, acquired)
+			t.Cleanup(release)
+
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"capacity-model"}`))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			ctx.Request.Header.Set("X-Affinity-Key", "capacity-fixture")
+			common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "default")
+			Distribute()(ctx)
+			if test.skipRetry {
+				assert.True(t, ctx.IsAborted())
+				assert.Equal(t, http.StatusTooManyRequests, recorder.Code)
+				assert.Equal(t, channels[0].Id, ctx.GetInt("channel_id"))
+			} else {
+				assert.False(t, ctx.IsAborted(), recorder.Body.String())
+				assert.Equal(t, channels[1].Id, ctx.GetInt("channel_id"))
+				assert.Empty(t, common.GetContextKeyString(ctx, constant.ContextKeyChannelOrganization))
+			}
+			preferredID, found = service.GetPreferredChannelByAffinity(seed, "capacity-model", "default")
+			require.True(t, found)
+			wantPreferred := channels[0].Id
+			if !test.skipRetry && test.switchOnSuccess {
+				wantPreferred = channels[1].Id
+			}
+			assert.Equal(t, wantPreferred, preferredID)
+		})
+	}
+}
 
 func TestDistributePinnedChannelModelGroups(t *testing.T) {
 	require.NoError(t, i18n.Init())

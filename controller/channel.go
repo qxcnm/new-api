@@ -219,6 +219,10 @@ func buildFetchModelsHeaders(channel *model.Channel, key string) (http.Header, e
 	default:
 		headers = GetAuthHeader(key)
 	}
+	if planName, ok := constant.ResolveChannelPlan(channel.Type, channel.GetBaseURL()); ok &&
+		(planName == "minimax-coding-plan" || planName == "minimax-coding-plan-international") {
+		headers = GetClaudeAuthHeader(key)
+	}
 
 	if err := applyFetchModelsHeaderOverrides(channel, key, headers); err != nil {
 		return nil, err
@@ -472,6 +476,9 @@ func GetChannelKey(c *gin.Context) {
 func validateChannel(channel *model.Channel, isAdd bool) error {
 	if channel == nil {
 		return fmt.Errorf("channel cannot be empty")
+	}
+	if channel.ChannelInfo.MaxConcurrency < 0 || channel.ChannelInfo.MaxConcurrency > model.MaxChannelConcurrency {
+		return fmt.Errorf("渠道并发上限必须是 0-%d", model.MaxChannelConcurrency)
 	}
 
 	// 校验 channel settings
@@ -1044,6 +1051,11 @@ func UpdateChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	requestedMaxConcurrency := channel.ChannelInfo.MaxConcurrency
+	maxConcurrencyProvided := false
+	if rawChannelInfo, ok := requestData["channel_info"].(map[string]any); ok {
+		_, maxConcurrencyProvided = rawChannelInfo["max_concurrency"]
+	}
 	if _, ok := requestData["status"]; ok {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
@@ -1107,6 +1119,9 @@ func UpdateChannel(c *gin.Context) {
 
 	// Always copy the original ChannelInfo so that fields like IsMultiKey and MultiKeySize are retained.
 	channel.ChannelInfo = originChannel.ChannelInfo
+	if maxConcurrencyProvided {
+		channel.ChannelInfo.MaxConcurrency = requestedMaxConcurrency
+	}
 	// Recompute plan identity after applying the patch; client-provided fields
 	// are never trusted and old channel_info JSON remains compatible.
 	effectiveType := originChannel.Type
@@ -1220,7 +1235,7 @@ func UpdateChannel(c *gin.Context) {
 			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
 		}
 	}
-	err = channel.Update()
+	err = channel.UpdateWithChannelInfo()
 	if err != nil {
 		common.ApiError(c, err)
 		return

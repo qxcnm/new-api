@@ -47,6 +47,9 @@ export const STATIC_I18N_KEYS = [
   'Model group bindings must reference models in this channel',
   'Select at least one group for each model, or use channel groups',
   'Model group bindings must use groups selected for this channel',
+  'Channel Concurrency Limit',
+  'Maximum in-flight requests for this channel. 0 means unlimited; when full, requests fall back to the next channel.',
+  'Channel concurrency limit must be a whole number between 0 and 100000',
   'For this channel, map the model name in client requests to the model name sent upstream.',
   // Channel provider labels, descriptions and presentation badges.
   'Zhipu GLM',

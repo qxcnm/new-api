@@ -34,16 +34,28 @@ func TestChannelPlanJSONDatabases(t *testing.T) {
 				channel := Channel{Type: constant.ChannelTypeZhipu_v4, BaseURL: &base, Key: "fixture-key", Name: "legacy"}
 				require.NoError(t, db.Create(&channel).Error)
 				require.NoError(t, db.Model(&channel).Update("channel_info", `{"is_multi_key":true,"multi_key_size":2,"multi_key_polling_index":1}`).Error)
-				for range 2 {
+				for step, limit := range []int{0, 3, 0} {
 					var saved Channel
 					require.NoError(t, db.First(&saved, channel.Id).Error)
+					if step == 0 {
+						assert.Zero(t, saved.ChannelInfo.MaxConcurrency)
+					}
 					saved.DetectPlan()
 					assert.Equal(t, plan, saved.ChannelInfo.IsPlan)
+					if plan {
+						assert.Equal(t, "glm-coding-plan", saved.ChannelInfo.PlanName)
+					} else {
+						assert.Empty(t, saved.ChannelInfo.PlanName)
+					}
 					assert.True(t, saved.ChannelInfo.IsMultiKey)
 					assert.Equal(t, 2, saved.ChannelInfo.MultiKeySize)
 					assert.Equal(t, 1, saved.ChannelInfo.MultiKeyPollingIndex)
 					assert.Equal(t, "fixture-key", saved.Key)
+					saved.ChannelInfo.MaxConcurrency = limit
 					require.NoError(t, db.Model(&saved).Update("channel_info", saved.ChannelInfo).Error)
+					var reloaded Channel
+					require.NoError(t, db.First(&reloaded, channel.Id).Error)
+					assert.Equal(t, saved.ChannelInfo, reloaded.ChannelInfo)
 				}
 			}
 		})
@@ -57,6 +69,7 @@ func TestChannelInfoOldJSONRemainsReadable(t *testing.T) {
 	require.Equal(t, 2, info.MultiKeySize)
 	require.False(t, info.IsPlan)
 	require.Empty(t, info.PlanName)
+	require.Zero(t, info.MaxConcurrency)
 }
 
 func TestDetectPlanIgnoresClientPlanFieldsForRegularChannel(t *testing.T) {

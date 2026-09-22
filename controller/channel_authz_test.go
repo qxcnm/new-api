@@ -158,6 +158,19 @@ func TestChannelStatusValidation(t *testing.T) {
 	assert.False(t, isManageableChannelStatus(0))
 }
 
+func TestValidateChannelMaxConcurrency(t *testing.T) {
+	channel := &model.Channel{Key: "fixture-key"}
+
+	channel.ChannelInfo.MaxConcurrency = -1
+	assert.Error(t, validateChannel(channel, false))
+
+	channel.ChannelInfo.MaxConcurrency = model.MaxChannelConcurrency + 1
+	assert.Error(t, validateChannel(channel, false))
+
+	channel.ChannelInfo.MaxConcurrency = model.MaxChannelConcurrency
+	assert.NoError(t, validateChannel(channel, false))
+}
+
 // TestChannelFieldsAreClassified guards the fail-closed sensitivity check: every
 // JSON field of PatchChannel (including the embedded model.Channel) must be listed
 // in channelSensitiveFields, channelNonSensitiveFields, or

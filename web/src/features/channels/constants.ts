@@ -347,6 +347,8 @@ export const ERROR_MESSAGES = {
     'HTTP/2 connection shards must be between 1 and 8',
   INVALID_HTTP1_WITH_SHARDS:
     'HTTP/2 connection shards must be 1 when HTTP/1.1 is selected',
+  INVALID_MAX_CONCURRENCY:
+    'Channel concurrency limit must be a whole number between 0 and 100000',
   CREATE_FAILED: 'Failed to create channel',
   UPDATE_FAILED: 'Failed to update channel',
   DELETE_FAILED: 'Failed to delete channel',
@@ -384,6 +386,7 @@ export const DEFAULT_CHANNEL_VALUES = {
   group: 'default',
   status: CHANNEL_STATUS.ENABLED,
   priority: 0,
+  max_concurrency: 0,
   weight: 0,
   auto_ban: 1,
   remark: '',
@@ -469,6 +472,8 @@ export const FIELD_DESCRIPTIONS = {
   MODEL_GROUPS:
     'Bind each model on this channel to the groups that may use it. Models without an entry keep the legacy channel groups.',
   PRIORITY: 'Higher priority channels are selected first',
+  MAX_CONCURRENCY:
+    'Maximum in-flight requests for this channel. 0 means unlimited; when full, requests fall back to the next channel.',
   WEIGHT: 'Used for load balancing. Higher weight = more requests',
   TEST_MODEL: 'Model to use when testing channel connectivity',
   AUTO_BAN: 'Automatically disable channel on repeated failures',

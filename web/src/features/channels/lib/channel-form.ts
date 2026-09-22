@@ -28,7 +28,7 @@ import {
   MODEL_FETCHABLE_TYPES,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
 } from '../constants'
-import type { Channel } from '../types'
+import type { Channel, ChannelWritePayload } from '../types'
 import {
   CHANNEL_TYPE_ADVANCED_CUSTOM,
   advancedCustomConfigUsesRelativeUpstreamPath,
@@ -79,6 +79,7 @@ function isOptionalProxyURL(value: string | undefined): boolean {
 export const HTTP_PROTOCOL_AUTO = 'auto'
 export const HTTP_PROTOCOL_HTTP1 = 'http1'
 export const MAX_HTTP2_CONNECTION_SHARDS = 8
+export const MAX_CHANNEL_CONCURRENCY = 100_000
 
 export function normalizeHttpProtocol(
   value: string | undefined | null
@@ -219,6 +220,16 @@ export const channelFormSchema = z
     model_groups: z.string().optional(),
     model_schedules: z.string().optional(),
     priority: z.number().optional(),
+    max_concurrency: z
+      .number()
+      .refine(
+        (value) =>
+          Number.isInteger(value) &&
+          value >= 0 &&
+          value <= MAX_CHANNEL_CONCURRENCY,
+        ERROR_MESSAGES.INVALID_MAX_CONCURRENCY
+      )
+      .optional(),
     weight: z.number().optional(),
     test_model: z.string().optional(),
     auto_ban: z.number().optional(),
@@ -441,6 +452,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   model_groups: '',
   model_schedules: '',
   priority: 0,
+  max_concurrency: 0,
   weight: 0,
   test_model: '',
   auto_ban: 1,
@@ -600,6 +612,10 @@ export function transformChannelToFormDefaults(
     model_mapping: channel.model_mapping || '',
     model_groups: channel.model_groups || '',
     priority: channel.priority || 0,
+    max_concurrency: Math.min(
+      Math.max(channel.channel_info.max_concurrency ?? 0, 0),
+      MAX_CHANNEL_CONCURRENCY
+    ),
     weight: channel.weight || 0,
     test_model: channel.test_model || '',
     auto_ban: channel.auto_ban ?? 1,
@@ -831,11 +847,11 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
   mode: 'single' | 'batch' | 'multi_to_single'
   multi_key_mode?: 'random' | 'polling' | 'sequential'
   batch_add_set_key_prefix_2_name?: boolean
-  channel: Partial<Channel>
+  channel: ChannelWritePayload
 } {
   const mode = formData.multi_key_mode || 'single'
 
-  const channel: Partial<Channel> = {
+  const channel: ChannelWritePayload = {
     name: formData.name,
     type: formData.type,
     base_url: normalizeBaseUrl(formData.base_url) || null,
@@ -858,6 +874,7 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
     header_override: formData.header_override || null,
     settings: buildSettingsJSON(formData),
     other: formData.other || '',
+    channel_info: { max_concurrency: formData.max_concurrency ?? 0 },
   }
 
   // Clean up empty strings to null for optional fields
@@ -883,8 +900,8 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
 export function transformFormDataToUpdatePayload(
   formData: ChannelFormValues,
   channelId: number
-): Partial<Channel> {
-  const payload: Partial<Channel> = {
+): ChannelWritePayload {
+  const payload: ChannelWritePayload = {
     id: channelId,
     name: formData.name,
     type: formData.type,
@@ -906,6 +923,7 @@ export function transformFormDataToUpdatePayload(
     header_override: formData.header_override || null,
     settings: buildSettingsJSON(formData),
     other: formData.other || '',
+    channel_info: { max_concurrency: formData.max_concurrency ?? 0 },
   }
 
   // Only include key if it was changed (not empty)

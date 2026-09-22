@@ -63,6 +63,21 @@ func TestResetStatusCode(t *testing.T) {
 	}
 }
 
+func TestShouldDisableChannelSkipsConcurrencyLimit(t *testing.T) {
+	previous := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled = previous
+	})
+
+	err := types.NewErrorWithStatusCode(
+		fmt.Errorf("channel is at its configured concurrency limit"),
+		types.ErrorCodeChannelConcurrencyLimit,
+		http.StatusTooManyRequests,
+	)
+	require.False(t, ShouldDisableChannel(err))
+}
+
 func TestRelayErrorHandlerTruncatesInvalidJSONBodyInLog(t *testing.T) {
 	withDebugEnabled(t, false)
 

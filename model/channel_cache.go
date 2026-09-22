@@ -134,7 +134,8 @@ func filterModelGroupCandidates(ids []int, group, modelName string) []int {
 	allowed := make([]int, 0, len(ids))
 	now := time.Now()
 	for _, id := range ids {
-		if ChannelAllowsModelGroup(channelsIDM[id], group, modelName) && ChannelModelAvailableAt(channelsIDM[id], modelName, now) {
+		channel := channelsIDM[id]
+		if ChannelAllowsModelGroup(channel, group, modelName) && ChannelModelAvailableAt(channel, modelName, now) && !ChannelConcurrencyAtCapacity(channel) {
 			allowed = append(allowed, id)
 		}
 	}

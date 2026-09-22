@@ -14,9 +14,11 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18next from 'i18next'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import zh from '@/i18n/locales/zh.json'
@@ -76,6 +78,8 @@ beforeEach(async () => {
   vi.mocked(getGLMRiskStatus).mockReset()
   vi.mocked(getGLMResetCards).mockReset()
   vi.mocked(resetGLMCard).mockReset()
+  vi.mocked(toast.success).mockReset()
+  vi.mocked(toast.error).mockReset()
 })
 
 afterEach(() => {
@@ -561,6 +565,137 @@ describe('CodingPlan dialog', () => {
     expect(screen.getByText('upstream unavailable')).toBeInTheDocument()
   })
 
+  test.each([
+    ['switching channels', 'resolve'],
+    ['switching channels', 'reject'],
+    ['closing and reopening', 'resolve'],
+    ['closing and reopening', 'reject'],
+  ])(
+    'ignores a late reset response after %s (%s) without unlocking a newer reset',
+    async (transition, outcome) => {
+      const nextRow =
+        transition === 'switching channels'
+          ? { ...row, id: 8, name: 'Another GLM plan' }
+          : row
+      type ResetResponse = Awaited<ReturnType<typeof resetGLMCard>>
+      let settleReset!: (value: ResetResponse) => void
+      let rejectReset!: (reason?: unknown) => void
+      let settleCurrentReset!: (value: ResetResponse) => void
+      vi.mocked(resetGLMCard)
+        .mockReturnValueOnce(
+          new Promise<ResetResponse>((resolve, reject) => {
+            settleReset = resolve
+            rejectReset = reject
+          })
+        )
+        .mockReturnValueOnce(
+          new Promise<ResetResponse>((resolve) => {
+            settleCurrentReset = resolve
+          })
+        )
+      vi.mocked(getGLMResetCards).mockImplementation(async (channelId) => ({
+        success: true,
+        data: {
+          plan_name: 'glm-coding-plan',
+          five_hour_resets: [
+            {
+              recordId: channelId + 5,
+              expireTime: 'tomorrow',
+              available: true,
+            },
+          ],
+          week_resets: [],
+        },
+      }))
+      const invalidationSpy = vi.spyOn(client, 'invalidateQueries')
+      const view = render(
+        <QueryClientProvider client={client}>
+          <CodingPlanDialog mode='reset-cards' open onOpenChange={vi.fn()} />
+        </QueryClientProvider>
+      )
+
+      fireEvent.click(
+        await screen.findByRole('button', { name: 'Use Reset Card' })
+      )
+      fireEvent.click(
+        within(screen.getByRole('alertdialog')).getByRole('button', {
+          name: 'Use Reset Card',
+        })
+      )
+      await waitFor(() => expect(resetGLMCard).toHaveBeenCalledTimes(1))
+
+      if (transition === 'closing and reopening') {
+        view.rerender(
+          <QueryClientProvider client={client}>
+            <CodingPlanDialog
+              mode='reset-cards'
+              open={false}
+              onOpenChange={vi.fn()}
+            />
+          </QueryClientProvider>
+        )
+      }
+      vi.mocked(useChannels).mockReturnValue({
+        currentRow: nextRow,
+      } as ReturnType<typeof useChannels>)
+      view.rerender(
+        <QueryClientProvider client={client}>
+          <CodingPlanDialog mode='reset-cards' open onOpenChange={vi.fn()} />
+        </QueryClientProvider>
+      )
+      await waitFor(() =>
+        expect(getGLMResetCards).toHaveBeenCalledWith(nextRow.id)
+      )
+      expect(
+        await screen.findByText(`Reset card #${nextRow.id + 5}`)
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: 'Use Reset Card' })
+      ).toBeEnabled()
+      fireEvent.click(screen.getByRole('button', { name: 'Use Reset Card' }))
+      const currentConfirm = within(screen.getByRole('alertdialog')).getByRole(
+        'button',
+        { name: 'Use Reset Card' }
+      )
+      fireEvent.click(currentConfirm)
+      await waitFor(() => expect(resetGLMCard).toHaveBeenCalledTimes(2))
+      expect(currentConfirm).toBeDisabled()
+
+      if (outcome === 'resolve') {
+        await act(async () => {
+          settleReset({ success: true, data: { record_id: 12 } })
+          await Promise.resolve()
+        })
+      } else {
+        await act(async () => {
+          rejectReset(new Error('stale reset failed'))
+          await Promise.resolve()
+        })
+      }
+
+      expect(toast.success).not.toHaveBeenCalled()
+      expect(toast.error).not.toHaveBeenCalled()
+      expect(invalidationSpy).not.toHaveBeenCalled()
+      expect(getGLMResetCards).toHaveBeenCalledTimes(2)
+      expect(getGLMResetCards).toHaveBeenNthCalledWith(1, row.id)
+      expect(getGLMResetCards).toHaveBeenNthCalledWith(2, nextRow.id)
+      expect(screen.queryByText('stale reset failed')).not.toBeInTheDocument()
+      expect(currentConfirm).toBeDisabled()
+      await act(async () => {
+        settleCurrentReset({
+          success: true,
+          data: { record_id: nextRow.id + 5 },
+        })
+      })
+      expect(toast.success).toHaveBeenCalledExactlyOnceWith(
+        'Reset card used successfully'
+      )
+      expect(
+        screen.getByRole('button', { name: 'Use Reset Card' })
+      ).toBeEnabled()
+    }
+  )
+
   test('requires a second confirmation before using a reset card', async () => {
     vi.mocked(getGLMResetCards).mockResolvedValue({
       success: true,
@@ -595,5 +730,10 @@ describe('CodingPlan dialog', () => {
       })
     )
     await waitFor(() => expect(getGLMResetCards).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Use Reset Card' })
+      ).toBeEnabled()
+    )
   })
 })

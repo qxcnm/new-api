@@ -34,6 +34,7 @@ export const channelInfoSchema = z.object({
   multi_key_disabled_time: z.record(z.string(), z.number()).optional(),
   multi_key_polling_index: z.number().default(0),
   multi_key_mode: z.enum(['random', 'polling', 'sequential']).default('random'),
+  max_concurrency: z.number().nullish(),
 })
 
 export type ChannelInfo = z.infer<typeof channelInfoSchema>
@@ -81,6 +82,10 @@ export const channelSchema = z.object({
 })
 
 export type Channel = z.infer<typeof channelSchema>
+
+export type ChannelWritePayload = Omit<Partial<Channel>, 'channel_info'> & {
+  channel_info?: Partial<ChannelInfo>
+}
 
 // ============================================================================
 // Channel Settings Types
@@ -420,6 +425,7 @@ export interface ChannelFormData {
   group: string
   model_mapping?: string
   priority?: number
+  max_concurrency?: number
   weight?: number
   test_model?: string
   auto_ban?: number
@@ -446,5 +452,5 @@ export interface AddChannelRequest {
   mode: 'single' | 'batch' | 'multi_to_single'
   multi_key_mode?: 'random' | 'polling' | 'sequential'
   batch_add_set_key_prefix_2_name?: boolean
-  channel: Partial<Channel>
+  channel: ChannelWritePayload
 }

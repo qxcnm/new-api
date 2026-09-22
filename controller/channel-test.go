@@ -49,6 +49,12 @@ func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) s
 	if channel != nil && channel.Type == constant.ChannelTypeCodex {
 		return string(constant.EndpointTypeOpenAIResponse)
 	}
+	if channel != nil {
+		if planName, ok := constant.ResolveChannelPlan(channel.Type, channel.GetBaseURL()); ok &&
+			(planName == "minimax-coding-plan" || planName == "minimax-coding-plan-international") {
+			return string(constant.EndpointTypeAnthropic)
+		}
+	}
 	return normalized
 }
 

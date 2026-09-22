@@ -59,6 +59,8 @@ func TestChannelUpstreamModelURLUsesPlanResolution(t *testing.T) {
 		{name: "GLM plan", channelType: constant.ChannelTypeZhipu_v4, baseURL: "glm-coding-plan", want: "https://open.bigmodel.cn/api/coding/paas/v4/models"},
 		{name: "GLM plan trailing slash", channelType: constant.ChannelTypeZhipu_v4, baseURL: "glm-coding-plan/", want: "https://open.bigmodel.cn/api/coding/paas/v4/models"},
 		{name: "Kimi plan", channelType: constant.ChannelTypeMoonshot, baseURL: "kimi-coding-plan", want: "https://api.kimi.com/coding/v1/models"},
+		{name: "MiniMax plan", channelType: constant.ChannelTypeMiniMax, baseURL: "minimax-coding-plan", want: "https://api.minimaxi.com/anthropic/v1/models"},
+		{name: "MiniMax international plan", channelType: constant.ChannelTypeMiniMax, baseURL: "minimax-coding-plan-international", want: "https://api.minimax.io/anthropic/v1/models"},
 		{name: "regular GLM", channelType: constant.ChannelTypeZhipu_v4, baseURL: "https://open.bigmodel.cn", want: "https://open.bigmodel.cn/api/paas/v4/models"},
 		{name: "regular Volcengine", channelType: constant.ChannelTypeVolcEngine, baseURL: "https://ark.cn-beijing.volces.com", want: "https://ark.cn-beijing.volces.com/api/v3/models"},
 		{name: "custom Volcengine", channelType: constant.ChannelTypeVolcEngine, baseURL: "https://gateway.example/ark/", want: "https://gateway.example/ark/api/v3/models"},
